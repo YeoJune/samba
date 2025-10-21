@@ -30,29 +30,42 @@ class SambaReadout(nn.Module):
         
     def forward(self, sampled_hidden_states):
         """
+        Vectorized forward (no seq_len loop for efficiency)
+        
         Args:
             sampled_hidden_states: list of already sampled layer hidden states
+                                   [(batch, seq_len, d_inner, d_state), ...]
         """
         batch, seq_len = sampled_hidden_states[0].shape[:2]
         
-        # Stack and flatten sampled layers
-        hidden_flat = torch.stack([h.reshape(batch, seq_len, -1) for h in sampled_hidden_states], dim=0)
+        # Stack & Reshape: (num_layers, batch, seq_len, state_dim)
+        hidden_flat = torch.stack(
+            [h.reshape(batch, seq_len, -1) for h in sampled_hidden_states], 
+            dim=0
+        )
         
-        outputs = []
-        for t in range(seq_len):
-            h_t = hidden_flat[:, :, t, :]
-            
-            query = self.query_net(h_t.mean(dim=0, keepdim=True))
-            keys = self.key_net(h_t)
-            scores = torch.einsum('qbd,lbd->lbq', query, keys) * self.scale
-            attn_weights = torch.softmax(scores, dim=0)
-            
-            values = self.value_net(h_t)
-            aggregated = (attn_weights * values).sum(dim=0)
-            output_t = self.output_proj(aggregated)
-            outputs.append(output_t)
+        # Permute to (batch, seq_len, num_layers, state_dim)
+        h = hidden_flat.permute(1, 2, 0, 3)
         
-        readout_logits = torch.stack(outputs, dim=1)
+        # Query: mean over layers (batch, seq_len, state_dim) -> (batch, seq_len, 1, 128)
+        query_input = h.mean(dim=2)
+        query = self.query_net(query_input).unsqueeze(2)
+        
+        # Keys: (batch, seq_len, num_layers, 128)
+        keys = self.key_net(h)
+        
+        # Attention scores: (batch, seq_len, 1, num_layers)
+        scores = torch.einsum('bsqd,bsld->bsql', query, keys) * self.scale
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # Values: (batch, seq_len, num_layers, hidden_dim)
+        values = self.value_net(h)
+        
+        # Aggregate: (batch, seq_len, 1, hidden_dim) -> (batch, seq_len, hidden_dim)
+        aggregated = (attn_weights.transpose(-1, -2) @ values).squeeze(2)
+        
+        # Output projection: (batch, seq_len, vocab_size)
+        readout_logits = self.output_proj(aggregated)
         
         return readout_logits
 

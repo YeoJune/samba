@@ -10,9 +10,9 @@ import torch.nn.functional as F
 class LinearReadout(nn.Module):
     """
     Pure linear readout (most LSM-like)
-    Uses last layer only
+    Uses only sampled layers
     
-    Parameters: ~1.24B
+    Note: Receives pre-sampled hidden states from Samba
     """
     
     def __init__(self, d_inner, d_state, vocab_size):
@@ -20,9 +20,9 @@ class LinearReadout(nn.Module):
         input_dim = d_inner * d_state
         self.readout = nn.Linear(input_dim, vocab_size)
         
-    def forward(self, all_hidden_states):
-        # Use only last layer
-        last_hidden = all_hidden_states[-1]  # (batch, seq, d_inner, d_state)
+    def forward(self, sampled_hidden_states):
+        # Use only last sampled layer
+        last_hidden = sampled_hidden_states[-1]  # (batch, seq, d_inner, d_state)
         batch, seq_len = last_hidden.shape[:2]
         
         # Flatten
@@ -34,77 +34,78 @@ class LinearReadout(nn.Module):
 
 class SelectedLayersReadout(nn.Module):
     """
-    Linear readout from selected layers
-    Balance between information and parameters
+    Linear readout from selected sampled layers
     
-    Parameters: ~5B (for 4 layers)
+    Note: Receives pre-sampled hidden states from Samba
+    Can optionally sub-sample further if needed
     """
     
-    def __init__(self, d_inner, d_state, n_layers, vocab_size,
-                 selected_layers=None):
+    def __init__(self, d_inner, d_state, vocab_size, use_all_sampled=True):
         super().__init__()
+        self.use_all_sampled = use_all_sampled
         
-        # Default: select evenly spaced layers
-        if selected_layers is None:
-            n_select = min(4, n_layers)  # Select 4 layers
-            step = n_layers // n_select
-            selected_layers = [i * step for i in range(n_select)]
-            if selected_layers[-1] != n_layers - 1:
-                selected_layers[-1] = n_layers - 1  # Always include last
-        
-        self.selected_layers = selected_layers
-        input_dim = d_inner * d_state * len(selected_layers)
+        # If not using all, will use first, middle, last from sampled
+        input_dim = d_inner * d_state * (1 if not use_all_sampled else 3)
         
         self.readout = nn.Linear(input_dim, vocab_size)
         
-    def forward(self, all_hidden_states):
-        batch, seq_len = all_hidden_states[0].shape[:2]
+    def forward(self, sampled_hidden_states):
+        batch, seq_len = sampled_hidden_states[0].shape[:2]
         
-        # Select and concatenate layers at each timestep
-        outputs = []
-        for t in range(seq_len):
-            hidden_t = [
-                all_hidden_states[i][:, t, :, :].reshape(batch, -1)
-                for i in self.selected_layers
-            ]
-            hidden_concat = torch.cat(hidden_t, dim=-1)
-            output_t = self.readout(hidden_concat)
-            outputs.append(output_t)
-        
-        return torch.stack(outputs, dim=1)
+        if self.use_all_sampled:
+            # Concatenate all sampled layers
+            outputs = []
+            for t in range(seq_len):
+                hidden_t = [
+                    h[:, t, :, :].reshape(batch, -1)
+                    for h in sampled_hidden_states
+                ]
+                hidden_concat = torch.cat(hidden_t, dim=-1)
+                output_t = self.readout(hidden_concat)
+                outputs.append(output_t)
+            return torch.stack(outputs, dim=1)
+        else:
+            # Use first, middle, last from sampled
+            n = len(sampled_hidden_states)
+            selected = [sampled_hidden_states[0], 
+                       sampled_hidden_states[n//2], 
+                       sampled_hidden_states[-1]]
+            
+            outputs = []
+            for t in range(seq_len):
+                hidden_t = [h[:, t, :, :].reshape(batch, -1) for h in selected]
+                hidden_concat = torch.cat(hidden_t, dim=-1)
+                output_t = self.readout(hidden_concat)
+                outputs.append(output_t)
+            return torch.stack(outputs, dim=1)
 
 
 class BottleneckReadout(nn.Module):
     """
     Readout with dimensionality reduction bottleneck
-    More efficient while preserving information
     
-    Parameters: ~330M
+    Note: Receives pre-sampled hidden states from Samba
     """
     
-    def __init__(self, d_inner, d_state, n_layers, vocab_size,
-                 bottleneck_dim=512):
+    def __init__(self, d_inner, d_state, vocab_size, bottleneck_dim=512):
         super().__init__()
         
         input_dim = d_inner * d_state
         
-        # Per-layer projection to bottleneck
-        self.layer_projections = nn.ModuleList([
-            nn.Linear(input_dim, bottleneck_dim)
-            for _ in range(n_layers)
-        ])
+        # Shared projection to bottleneck (applied to each layer)
+        self.layer_projection = nn.Linear(input_dim, bottleneck_dim)
         
         # Final readout from summed bottleneck
         self.final_readout = nn.Linear(bottleneck_dim, vocab_size)
         
-    def forward(self, all_hidden_states):
-        batch, seq_len = all_hidden_states[0].shape[:2]
+    def forward(self, sampled_hidden_states):
+        batch, seq_len = sampled_hidden_states[0].shape[:2]
         
-        # Project each layer to bottleneck
+        # Project each sampled layer to bottleneck
         bottlenecks = []
-        for layer_idx, hidden_states in enumerate(all_hidden_states):
+        for hidden_states in sampled_hidden_states:
             hidden_flat = hidden_states.reshape(batch, seq_len, -1)
-            bottleneck = self.layer_projections[layer_idx](hidden_flat)
+            bottleneck = self.layer_projection(hidden_flat)
             bottlenecks.append(bottleneck)
         
         # Sum across layers
@@ -117,37 +118,40 @@ class BottleneckReadout(nn.Module):
 class WeightedLayersReadout(nn.Module):
     """
     Per-layer linear readout with learnable weighted sum
-    Allows model to learn which layers are important
     
-    Parameters: ~30B (but most efficient training)
+    Note: Receives pre-sampled hidden states from Samba
+    Learns importance of each sampled layer
     """
     
-    def __init__(self, d_inner, d_state, n_layers, vocab_size):
+    def __init__(self, d_inner, d_state, vocab_size):
         super().__init__()
         
         input_dim = d_inner * d_state
         
-        # Each layer gets its own readout
-        self.layer_readouts = nn.ModuleList([
-            nn.Linear(input_dim, vocab_size)
-            for _ in range(n_layers)
-        ])
+        # Shared readout projection (applied to each layer)
+        self.layer_readout = nn.Linear(input_dim, vocab_size)
         
-        # Learnable weights for combining layers
-        self.layer_weights = nn.Parameter(torch.ones(n_layers))
+        # Learnable weights (will be sized dynamically based on input)
+        # Initialized in first forward pass
+        self.layer_weights = None
         
-    def forward(self, all_hidden_states):
-        batch, seq_len = all_hidden_states[0].shape[:2]
+    def forward(self, sampled_hidden_states):
+        batch, seq_len = sampled_hidden_states[0].shape[:2]
+        n_sampled = len(sampled_hidden_states)
         
-        # Process each layer independently
+        # Initialize weights on first forward pass
+        if self.layer_weights is None:
+            self.layer_weights = nn.Parameter(torch.ones(n_sampled, device=sampled_hidden_states[0].device))
+        
+        # Process each sampled layer independently
         layer_outputs = []
-        for layer_idx, hidden_states in enumerate(all_hidden_states):
+        for hidden_states in sampled_hidden_states:
             hidden_flat = hidden_states.reshape(batch, seq_len, -1)
-            layer_out = self.layer_readouts[layer_idx](hidden_flat)
+            layer_out = self.layer_readout(hidden_flat)
             layer_outputs.append(layer_out)
         
         # Weighted sum
-        stacked = torch.stack(layer_outputs, dim=0)  # (n_layers, batch, seq, vocab)
+        stacked = torch.stack(layer_outputs, dim=0)  # (n_sampled, batch, seq, vocab)
         weights = F.softmax(self.layer_weights, dim=0).view(-1, 1, 1, 1)
         
         return (stacked * weights).sum(dim=0)
@@ -155,14 +159,12 @@ class WeightedLayersReadout(nn.Module):
 
 class EfficientMeanPoolReadout(nn.Module):
     """
-    Current implementation but optimized
-    Mean pooling + 2-layer MLP (simpler than before)
+    Mean pooling + 2-layer MLP
     
-    Parameters: ~77M
+    Note: Receives pre-sampled hidden states from Samba
     """
     
-    def __init__(self, d_inner, d_state, n_layers, vocab_size,
-                 bottleneck_dim=1024):
+    def __init__(self, d_inner, d_state, vocab_size, bottleneck_dim=1024):
         super().__init__()
         
         input_dim = d_inner * d_state
@@ -173,11 +175,11 @@ class EfficientMeanPoolReadout(nn.Module):
             nn.Linear(bottleneck_dim, vocab_size)
         )
         
-    def forward(self, all_hidden_states):
-        batch, seq_len = all_hidden_states[0].shape[:2]
+    def forward(self, sampled_hidden_states):
+        batch, seq_len = sampled_hidden_states[0].shape[:2]
         
-        # Mean pool across layers
-        stacked = torch.stack(all_hidden_states, dim=0)
+        # Mean pool across sampled layers
+        stacked = torch.stack(sampled_hidden_states, dim=0)
         pooled = stacked.mean(dim=0)
         pooled_flat = pooled.reshape(batch, seq_len, -1)
         
@@ -188,57 +190,58 @@ class EfficientMeanPoolReadout(nn.Module):
 READOUT_OPTIONS = {
     'linear': {
         'class': LinearReadout,
-        'params': '1.24B',
+        'description': 'Pure linear readout from last sampled layer',
+        'params': '~1.24B',
         'lsm_philosophy': 'Excellent',
-        'information': 'Medium (last layer only)',
-        'training': 'Slow (large linear layer)',
-        'recommended_for': 'Most LSM-like, if you have memory'
+        'information': 'Medium (last sampled layer only)',
+        'recommended_for': 'Most LSM-like, simple readout'
     },
     'selected_layers': {
         'class': SelectedLayersReadout,
-        'params': '~5B',
+        'description': 'Linear readout from sampled layers',
+        'params': 'Varies with sampled layers',
         'lsm_philosophy': 'Good',
-        'information': 'Good (4 layers)',
-        'training': 'Slow',
-        'recommended_for': 'Good balance of philosophy and information'
+        'information': 'Good (uses sampled layers)',
+        'recommended_for': 'Balance of philosophy and information'
     },
     'bottleneck': {
         'class': BottleneckReadout,
-        'params': '330M',
+        'description': 'Bottleneck readout from sampled layers',
+        'params': '~330M / n_layers * n_sampled',
         'lsm_philosophy': 'Fair',
-        'information': 'Good (all layers)',
-        'training': 'Medium',
+        'information': 'Good (all sampled layers)',
         'recommended_for': 'Information preservation with reasonable size'
     },
     'weighted': {
         'class': WeightedLayersReadout,
-        'params': '30B',
+        'description': 'Weighted readout learning sampled layer importance',
+        'params': 'Shared weights across layers',
         'lsm_philosophy': 'Good',
-        'information': 'Excellent (all layers, learned weights)',
-        'training': 'Slow',
-        'recommended_for': 'Learn layer importance, if you have memory'
+        'information': 'Excellent (learned weights)',
+        'recommended_for': 'Learn layer importance efficiently'
     },
     'efficient_mean': {
         'class': EfficientMeanPoolReadout,
-        'params': '77M',
+        'description': 'Mean pooling over sampled layers',
+        'params': '~77M',
         'lsm_philosophy': 'Fair',
         'information': 'Fair (mean pooling)',
-        'training': 'Fast',
         'recommended_for': 'Quick experiments, proof of concept'
     }
 }
 
 
-def get_readout(readout_type, d_inner, d_state, n_layers, vocab_size, **kwargs):
+def get_readout(readout_type, d_inner, d_state, vocab_size, **kwargs):
     """
     Factory function to get readout layer
+    
+    Note: All readouts now receive pre-sampled hidden states from Samba.forward
     
     Args:
         readout_type: One of ['linear', 'selected_layers', 'bottleneck', 
                               'weighted', 'efficient_mean']
         d_inner: Inner dimension
         d_state: State dimension
-        n_layers: Number of layers
         vocab_size: Vocabulary size
         **kwargs: Additional arguments for specific readout types
         
@@ -248,12 +251,12 @@ def get_readout(readout_type, d_inner, d_state, n_layers, vocab_size, **kwargs):
     if readout_type == 'linear':
         return LinearReadout(d_inner, d_state, vocab_size)
     elif readout_type == 'selected_layers':
-        return SelectedLayersReadout(d_inner, d_state, n_layers, vocab_size, **kwargs)
+        return SelectedLayersReadout(d_inner, d_state, vocab_size, **kwargs)
     elif readout_type == 'bottleneck':
-        return BottleneckReadout(d_inner, d_state, n_layers, vocab_size, **kwargs)
+        return BottleneckReadout(d_inner, d_state, vocab_size, **kwargs)
     elif readout_type == 'weighted':
-        return WeightedLayersReadout(d_inner, d_state, n_layers, vocab_size)
+        return WeightedLayersReadout(d_inner, d_state, vocab_size)
     elif readout_type == 'efficient_mean':
-        return EfficientMeanPoolReadout(d_inner, d_state, n_layers, vocab_size, **kwargs)
+        return EfficientMeanPoolReadout(d_inner, d_state, vocab_size, **kwargs)
     else:
         raise ValueError(f"Unknown readout type: {readout_type}")

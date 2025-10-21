@@ -118,11 +118,38 @@ class Samba(nn.Module):
             - sampled_hidden_states: list of sampled layer hidden states (for loss)
             - sampled_layer_indices: layer indices used for readout and loss
         """
-        main_logits, all_hidden_states = self.mamba(input_ids)
-        readout_logits, sampled_layer_indices = self.readout(all_hidden_states)
         
-        # Return only sampled hidden states to save VRAM
-        sampled_hidden_states = [all_hidden_states[i] for i in sampled_layer_indices]
+        # Mamba의 구성 요소 가져오기
+        embedding = self.mamba.embedding
+        layers = self.mamba.layers
+        norm_f = self.mamba.norm_f
+        lm_head = self.mamba.lm_head
+
+        # 1. 임베딩
+        x = embedding(input_ids)
+        
+        # 2. 레이어 순회 (VRAM 최적화 핵심)
+        sampled_hidden_states = []  # 샘플링된 6개 텐서만 저장할 리스트
+        layer_indices_for_readout = list(range(0, self.n_layers, self.readout.stride))
+        
+        for i, layer in enumerate(layers):
+            x, hidden_states = layer(x)  # (x는 768, hidden_states는 d_inner*d_state 차원)
+            
+            # stride에 해당하는 레이어의 'hidden_states'만 저장
+            if i in layer_indices_for_readout:
+                sampled_hidden_states.append(hidden_states)
+            
+            # (i가 해당하지 않으면, hidden_states는 VRAM에서 해제됨)
+        
+        # 3. Mamba의 최종 출력 계산
+        x = norm_f(x)
+        main_logits = lm_head(x)
+        
+        # 4. Readout 계산 (이제 6개 리스트만 받음)
+        readout_logits, _ = self.readout(sampled_hidden_states)
+        
+        # 5. Pruning Loss를 위해 반환
+        sampled_layer_indices = layer_indices_for_readout
         
         return main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices
     

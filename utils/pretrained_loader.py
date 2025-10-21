@@ -97,13 +97,18 @@ def verify_weight_match(our_model, pretrained_name="state-spaces/mamba-130m-hf")
     
     hf_model = AutoModelForCausalLM.from_pretrained(pretrained_name)
     
+    # Move both models to CPU for comparison
+    device = next(our_model.parameters()).device
+    our_model_cpu = our_model.cpu()
+    hf_model_cpu = hf_model.cpu()
+    
     # Check embedding
-    emb_diff = (our_model.embedding.weight - hf_model.backbone.embeddings.weight).abs().max()
+    emb_diff = (our_model_cpu.embedding.weight - hf_model_cpu.backbone.embeddings.weight).abs().max()
     print(f"Embedding max diff: {emb_diff:.2e}")
     
     # Check first layer
-    our_layer = our_model.layers[0].mamba
-    hf_layer = hf_model.backbone.layers[0].mixer
+    our_layer = our_model_cpu.layers[0].mamba
+    hf_layer = hf_model_cpu.backbone.layers[0].mixer
     
     in_proj_diff = (our_layer.in_proj.weight - hf_layer.in_proj.weight).abs().max()
     A_log_diff = (our_layer.A_log - hf_layer.A_log).abs().max()
@@ -112,8 +117,11 @@ def verify_weight_match(our_model, pretrained_name="state-spaces/mamba-130m-hf")
     print(f"Layer 0 A_log max diff: {A_log_diff:.2e}")
     
     # Check final norm
-    norm_diff = (our_model.norm_f.weight - hf_model.backbone.norm_f.weight).abs().max()
+    norm_diff = (our_model_cpu.norm_f.weight - hf_model_cpu.backbone.norm_f.weight).abs().max()
     print(f"Final norm max diff: {norm_diff:.2e}")
+    
+    # Move our model back to original device
+    our_model.to(device)
     
     threshold = 1e-5
     if emb_diff < threshold and in_proj_diff < threshold and A_log_diff < threshold and norm_diff < threshold:

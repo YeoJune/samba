@@ -52,7 +52,11 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         targets = targets.to(device)
         
         # Forward pass
-        main_logits, readout_logits, all_hidden_states = model(input_ids)
+        outputs = model(input_ids)
+        if len(outputs) == 4:
+            main_logits, readout_logits, all_hidden_states, _ = outputs
+        else:
+            main_logits, readout_logits, all_hidden_states = outputs
         
         vocab_size = main_logits.size(-1)
         
@@ -132,7 +136,11 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
         targets = targets.to(device)
         
         # Forward pass
-        main_logits, readout_logits, all_hidden_states = model(input_ids)
+        outputs = model(input_ids)
+        if len(outputs) == 4:
+            main_logits, readout_logits, all_hidden_states, _ = outputs
+        else:
+            main_logits, readout_logits, all_hidden_states = outputs
         
         vocab_size = main_logits.size(-1)
         

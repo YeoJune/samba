@@ -9,7 +9,11 @@ model:
   d_conv: 4          # Convolution kernel size
   expand_factor: 2   # Expansion factor (d_inner = d_model * expand)
   dt_rank: 48        # Delta rank (ceil(d_model / 16))
-  readout_hidden_dim: 512  # MLP readout hidden dimension
+  
+  # Readout configuration
+  readout_type: "efficient_mean"  # Options: linear, selected_layers, bottleneck, weighted, efficient_mean
+  readout_hidden_dim: 1024  # For efficient_mean and bottleneck
+  readout_selected_layers: [0, 8, 16, 23]  # For selected_layers (null for auto)
 
 # Pretrained Model
 pretrained:

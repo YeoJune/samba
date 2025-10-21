@@ -6,7 +6,7 @@
 
 - 🎯 **168M Parameters** - Mamba backbone (129M) + Efficient readout (38M)
 - 🔄 **Pretrained Weights** - Load from `state-spaces/mamba-130m-hf`
-- ⚡ **Efficient Readout** - Mean pooling + stride sampling (75% VRAM reduction)
+- ⚡ **Efficient Readout** - Layer stride sampling (75% VRAM reduction)
 - 📊 **WikiText-2 Dataset** - Standard language modeling benchmark
 - ⚙️ **Config-based Training** - YAML configuration for easy experimentation
 - 🔍 **Sparsity Analysis** - Track and analyze SSM hidden state sparsity
@@ -24,26 +24,24 @@ Most state-of-the-art NLP models use dense representations, but the brain proces
 ### Model Architecture
 
 - **Base**: Mamba-130m (768d, 24 layers) - HuggingFace compatible
-- **Readout**: Efficient mean pooling with stride sampling
-  - Mean pool across 24 layers (reduces to single representation)
-  - Stride sampling (e.g., stride=4: only compute every 4th timestep)
-  - Linear interpolation to full sequence
-  - 75% VRAM reduction with stride=4
-- **Dual outputs**: 
+- **Readout**: Efficient attention-based readout with layer stride sampling
+  - Layer stride sampling (e.g., stride=4: use layers 0, 4, 8, 12, 16, 20)
+  - Attention aggregation across sampled layers
+  - 75% VRAM reduction with stride=4 (6 layers instead of 24)
+- **Dual outputs**:
   - Main output from Mamba (for maintaining original performance)
-  - Readout output from pooled representation (for semantic verification)
+  - Readout output from aggregated hidden states (for semantic verification)
 
 ### Loss Functions
 
 1. **Main Loss**: Standard cross-entropy on Mamba's output
    - Ensures the model maintains language modeling performance
-   
 2. **Readout Loss**: Cross-entropy on the dense readout vector
    - Forces the aggregated hidden states to contain meaningful semantic information
    - Verifies that sparse representations preserve task-relevant information
-   
-3. **Pruning Loss**: L1 regularization on hidden states
+3. **Pruning Loss**: L1 regularization on sampled layer hidden states
    - Encourages sparsity in hidden state activations
+   - Applied only to sampled layers (VRAM efficient)
    - Mimics the sparse coding in biological neural systems
 
 ```
@@ -51,6 +49,7 @@ Total Loss = Main Loss + α × Readout Loss + λ × Pruning Loss
 ```
 
 Where:
+
 - `α` (readout_weight): balances semantic preservation (default: 0.5)
 - `λ` (pruning_weight): controls sparsity level (default: 0.05)
 
@@ -61,6 +60,7 @@ pip install -r requirements.txt
 ```
 
 Required packages:
+
 - `torch>=2.0.0`
 - `transformers>=4.39.0` (for pretrained Mamba)
 - `datasets>=2.14.0` (for WikiText-2)
@@ -92,7 +92,7 @@ model:
   d_conv: 4
   expand_factor: 2
   readout_hidden_dim: 512
-  readout_stride: 4  # Sample every 4 timesteps (75% VRAM reduction)
+  readout_stride: 4 # Sample every 4th layer (75% VRAM reduction)
 
 # Pretrained
 pretrained:
@@ -106,8 +106,8 @@ training:
   seq_len: 512
   epochs: 10
   lr: 5e-5
-  readout_weight: 0.5  # α
-  pruning_weight: 0.05  # λ
+  readout_weight: 0.5 # α
+  pruning_weight: 0.05 # λ
 
 # Dataset
 dataset:
@@ -126,6 +126,7 @@ logging:
 ```
 
 Then run:
+
 ```bash
 python train.py --config config/config.yaml
 ```
@@ -163,20 +164,21 @@ Samba (168M total):
 Parameters:
 - Mamba backbone: 129M (77.1%)
 - Efficient Readout: 38M (22.9%)
-  - Layer 1: 13M (state → hidden)
-  - Layer 2: 26M (hidden → vocab)
+  - Query/Key/Value nets: ~1M
+  - Output projection: ~37M (hidden → vocab)
 - Total: ~168M parameters
 
 Readout Design:
-- Mean pooling: Simple aggregation across layers
-- Stride sampling: Process every Nth timestep (default: 4)
-- VRAM savings: 75% reduction in readout computation
-- Trade-off: Simpler than attention, but VRAM-friendly
+- Layer stride sampling: Use every Nth layer (default: 4)
+- Attention aggregation: Query-key-value across sampled layers
+- VRAM savings: 75% reduction (6 layers instead of 24)
+- Compute only on sampled layers for both readout and pruning loss
 ```
 
 ### Pretrained Weights
 
 Loads weights from HuggingFace `state-spaces/mamba-130m-hf`:
+
 - Trained on The Pile (300B tokens)
 - Compatible architecture
 - Automatic weight verification
@@ -185,28 +187,27 @@ Loads weights from HuggingFace `state-spaces/mamba-130m-hf`:
 
 1. **Can we achieve comparable performance with sparse hidden states?**
    - Measure: Compare perplexity/accuracy of Samba vs. baseline Mamba
-   
 2. **How sparse can we make the representations?**
    - Measure: L0 norm, near-zero ratio of hidden states
-   
 3. **Do sparse representations preserve semantic information?**
    - Measure: Readout accuracy (how well the dense vector predicts)
 
 ## Expected Results
 
 With proper hyperparameter tuning:
+
 - **Target Sparsity**: 40-60% of hidden states near zero
 - **Performance**: <10% degradation from baseline
 - **Readout Accuracy**: Within 5% of main output
 
 ## Hyperparameter Tuning Guide
 
-| Parameter | Range | Effect |
-|-----------|-------|--------|
-| `readout_weight` (α) | 0.3-0.7 | Higher = better semantic preservation |
-| `pruning_weight` (λ) | 0.01-0.1 | Higher = more aggressive sparsity |
-| `learning_rate` | 1e-5 to 5e-5 | Lower if using pretrained |
-| `batch_size` | 8-32 | Depends on GPU memory |
+| Parameter            | Range        | Effect                                |
+| -------------------- | ------------ | ------------------------------------- |
+| `readout_weight` (α) | 0.3-0.7      | Higher = better semantic preservation |
+| `pruning_weight` (λ) | 0.01-0.1     | Higher = more aggressive sparsity     |
+| `learning_rate`      | 1e-5 to 5e-5 | Lower if using pretrained             |
+| `batch_size`         | 8-32         | Depends on GPU memory                 |
 
 ## Citation
 

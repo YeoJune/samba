@@ -44,25 +44,29 @@ class SambaReadout(nn.Module):
             dim=0
         )
         
-        # Permute to (batch, seq_len, num_layers, state_dim)
-        h = hidden_flat.permute(1, 2, 0, 3)
+        # Permute to (seq_len, num_layers, batch, state_dim) for vectorized processing
+        h = hidden_flat.permute(2, 0, 1, 3)  # (seq_len, num_layers, batch, state_dim)
         
-        # Query: mean over layers (batch, seq_len, state_dim) -> (batch, seq_len, 1, 128)
-        query_input = h.mean(dim=2)
-        query = self.query_net(query_input).unsqueeze(2)
+        # Query: mean over layers -> (seq_len, batch, state_dim) -> (seq_len, 1, batch, 128)
+        query_input = h.mean(dim=1)  # (seq_len, batch, state_dim)
+        query = self.query_net(query_input).unsqueeze(1)  # (seq_len, 1, batch, 128)
         
-        # Keys: (batch, seq_len, num_layers, 128)
+        # Keys: (seq_len, num_layers, batch, 128)
         keys = self.key_net(h)
         
-        # Attention scores: (batch, seq_len, 1, num_layers)
-        scores = torch.einsum('bsqd,bsld->bsql', query, keys) * self.scale
-        attn_weights = torch.softmax(scores, dim=-1)
+        # Attention scores: einsum('sqbd,slbd->slbq')
+        # s=seq_len, q=1, l=num_layers, b=batch, d=128
+        scores = torch.einsum('sqbd,slbd->slbq', query, keys) * self.scale  # (seq_len, num_layers, batch, 1)
+        attn_weights = torch.softmax(scores, dim=1)  # softmax over num_layers
         
-        # Values: (batch, seq_len, num_layers, hidden_dim)
+        # Values: (seq_len, num_layers, batch, hidden_dim)
         values = self.value_net(h)
         
-        # Aggregate: (batch, seq_len, 1, hidden_dim) -> (batch, seq_len, hidden_dim)
-        aggregated = (attn_weights.transpose(-1, -2) @ values).squeeze(2)
+        # Aggregate: sum over num_layers -> (seq_len, batch, hidden_dim)
+        aggregated = (attn_weights * values).sum(dim=1).squeeze(-1)  # (seq_len, batch, hidden_dim)
+        
+        # Permute back to (batch, seq_len, hidden_dim)
+        aggregated = aggregated.permute(1, 0, 2)
         
         # Output projection: (batch, seq_len, vocab_size)
         readout_logits = self.output_proj(aggregated)

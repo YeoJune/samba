@@ -1,35 +1,43 @@
 """
-Minimal Mamba Implementation
+Mamba Implementation (130M parameters, HuggingFace compatible)
 Based on "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class S6(nn.Module):
-    """Simplified S6 (Selective State Space) layer"""
+    """S6 (Selective State Space) layer - HuggingFace compatible"""
     
-    def __init__(self, d_model, d_state=16, expand_factor=2):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand_factor=2, dt_rank="auto"):
         super().__init__()
         self.d_model = d_model
         self.d_state = d_state
+        self.d_conv = d_conv
         self.d_inner = d_model * expand_factor
         
-        # Projections
+        # dt_rank: matches HuggingFace implementation
+        if dt_rank == "auto":
+            self.dt_rank = math.ceil(d_model / 16)
+        else:
+            self.dt_rank = dt_rank
+        
+        # Projections (same as HF)
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         self.conv1d = nn.Conv1d(
             self.d_inner, 
             self.d_inner, 
-            kernel_size=3, 
-            padding=1, 
+            kernel_size=d_conv, 
+            padding=d_conv - 1,
             groups=self.d_inner
         )
         
-        # SSM parameters
-        self.x_proj = nn.Linear(self.d_inner, d_state * 2, bias=False)
-        self.dt_proj = nn.Linear(self.d_inner, self.d_inner, bias=True)
+        # SSM parameters (same as HF)
+        self.x_proj = nn.Linear(self.d_inner, self.dt_rank + self.d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
         
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
@@ -52,7 +60,7 @@ class S6(nn.Module):
         
         # Convolution
         x = x.transpose(1, 2)  # (batch, d_inner, seq_len)
-        x = self.conv1d(x)
+        x = self.conv1d(x)[:, :, :seq_len]  # Causal: trim padding
         x = x.transpose(1, 2)  # (batch, seq_len, d_inner)
         x = F.silu(x)
         
@@ -69,16 +77,23 @@ class S6(nn.Module):
     
     def ssm(self, x):
         """
-        Selective State Space Model
+        Selective State Space Model (HuggingFace compatible)
         Returns output and hidden states for sparsity analysis
         """
         batch, seq_len, d_inner = x.shape
         
-        # Compute ∆, B, C
-        x_proj_out = self.x_proj(x)  # (batch, seq_len, d_state * 2)
-        B, C = x_proj_out.chunk(2, dim=-1)  # Each (batch, seq_len, d_state)
+        # Project x to get delta, B, C
+        x_dbl = self.x_proj(x)  # (batch, seq_len, dt_rank + 2*d_state)
         
-        delta = F.softplus(self.dt_proj(x))  # (batch, seq_len, d_inner)
+        # Split into delta, B, C
+        delta, B, C = torch.split(
+            x_dbl, 
+            [self.dt_rank, self.d_state, self.d_state], 
+            dim=-1
+        )
+        
+        # Process delta
+        delta = F.softplus(self.dt_proj(delta))  # (batch, seq_len, d_inner)
         
         # Discretize (simplified)
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
@@ -114,10 +129,10 @@ class S6(nn.Module):
 class MambaBlock(nn.Module):
     """Single Mamba block with normalization"""
     
-    def __init__(self, d_model, d_state=16, expand_factor=2):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand_factor=2, dt_rank="auto"):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
-        self.mamba = S6(d_model, d_state, expand_factor)
+        self.mamba = S6(d_model, d_state, d_conv, expand_factor, dt_rank)
         
     def forward(self, x):
         """
@@ -131,20 +146,22 @@ class MambaBlock(nn.Module):
 
 
 class Mamba(nn.Module):
-    """Full Mamba model"""
+    """Full Mamba model (130M parameters, HuggingFace compatible)"""
     
     def __init__(
         self, 
-        vocab_size, 
-        d_model=256, 
-        n_layers=4, 
+        vocab_size=50280, 
+        d_model=768, 
+        n_layers=24, 
         d_state=16,
-        expand_factor=2
+        d_conv=4,
+        expand_factor=2,
+        dt_rank="auto"
     ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
-            MambaBlock(d_model, d_state, expand_factor) 
+            MambaBlock(d_model, d_state, d_conv, expand_factor, dt_rank) 
             for _ in range(n_layers)
         ])
         self.norm_f = nn.LayerNorm(d_model)

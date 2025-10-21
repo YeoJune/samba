@@ -1,0 +1,54 @@
+# Samba Configuration
+
+# Model Configuration (130M - compatible with HuggingFace)
+model:
+  vocab_size: 50280  # GPT-2 tokenizer
+  d_model: 768       # Hidden dimension
+  n_layers: 24       # Number of Mamba blocks
+  d_state: 16        # SSM state dimension
+  d_conv: 4          # Convolution kernel size
+  expand_factor: 2   # Expansion factor (d_inner = d_model * expand)
+  dt_rank: 48        # Delta rank (ceil(d_model / 16))
+  readout_hidden_dim: 512  # MLP readout hidden dimension
+
+# Pretrained Model
+pretrained:
+  use_pretrained: true
+  model_name: "state-spaces/mamba-130m-hf"
+  freeze_backbone: false  # Whether to freeze Mamba layers
+
+# Training Configuration
+training:
+  batch_size: 16
+  seq_len: 512
+  epochs: 10
+  lr: 5e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  
+  # Loss weights
+  readout_weight: 0.5   # α - weight for readout loss
+  pruning_weight: 0.05  # λ - weight for pruning loss (L1)
+  
+  # Sparsity target (for adaptive pruning)
+  target_sparsity: 0.5  # Target 50% sparsity
+
+# Dataset Configuration
+dataset:
+  name: "wikitext"
+  config_name: "wikitext-2-raw-v1"
+  tokenizer: "gpt2"
+  max_length: 512
+  stride: 256  # For sliding window
+
+# Logging
+logging:
+  use_wandb: false
+  project_name: "samba"
+  log_interval: 10
+  save_dir: "checkpoints"
+  
+# Device
+device: "cuda"  # or "cpu"
+seed: 42

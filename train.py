@@ -1,5 +1,5 @@
 """
-Training script for Samba
+Training script for Samba (Config-based)
 """
 
 import torch
@@ -11,48 +11,33 @@ import argparse
 from tqdm import tqdm
 import wandb
 import os
+import yaml
 
 from model.samba import Samba
 from loss.readout_loss import ReadoutLossWithMetrics
 from loss.pruning_loss import PruningLossWithMetrics
-from utils.data import get_dataloaders
+from utils.data import get_wikitext_dataloaders
+from utils.pretrained_loader import load_pretrained_mamba, verify_weight_match
+
+
+def load_config(config_path):
+    """Load config from YAML file"""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Samba model')
-    
-    # Model args
-    parser.add_argument('--vocab_size', type=int, default=10000)
-    parser.add_argument('--d_model', type=int, default=256)
-    parser.add_argument('--n_layers', type=int, default=4)
-    parser.add_argument('--d_state', type=int, default=16)
-    parser.add_argument('--expand_factor', type=int, default=2)
-    
-    # Training args
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--seq_len', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=0.01)
-    
-    # Loss weights
-    parser.add_argument('--readout_weight', type=float, default=0.5, 
-                       help='Weight for readout loss (α)')
-    parser.add_argument('--pruning_weight', type=float, default=0.1, 
-                       help='Weight for pruning loss (λ)')
-    
-    # Others
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--save_dir', type=str, default='checkpoints')
-    parser.add_argument('--log_interval', type=int, default=100)
-    parser.add_argument('--use_wandb', action='store_true')
-    parser.add_argument('--project_name', type=str, default='samba')
-    
+    parser.add_argument('--config', type=str, default='config/config.yaml',
+                       help='Path to config file')
+    parser.add_argument('--no-pretrained', action='store_true',
+                       help='Train from scratch (ignore pretrained setting)')
     return parser.parse_args()
 
 
 def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn, 
-                pruning_loss_fn, args, epoch):
+                pruning_loss_fn, config, epoch, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -63,34 +48,38 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
     for batch_idx, (input_ids, targets) in enumerate(pbar):
-        input_ids = input_ids.to(args.device)
-        targets = targets.to(args.device)
+        input_ids = input_ids.to(device)
+        targets = targets.to(device)
         
         # Forward pass
         main_logits, readout_logits, all_hidden_states = model(input_ids)
         
+        vocab_size = main_logits.size(-1)
+        
         # Calculate losses
-        # Main loss: original Mamba loss
         main_loss = main_loss_fn(
-            main_logits.reshape(-1, args.vocab_size), 
+            main_logits.reshape(-1, vocab_size), 
             targets.reshape(-1)
         )
         
-        # Readout loss: auxiliary loss on dense vector
         readout_loss, readout_metrics = readout_loss_fn(readout_logits, targets)
-        
-        # Pruning loss: L1 sparsity on hidden states
         pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states)
         
         # Combined loss
+        readout_weight = config['training']['readout_weight']
+        pruning_weight = config['training']['pruning_weight']
+        
         loss = main_loss + \
-               args.readout_weight * readout_loss + \
-               args.pruning_weight * pruning_loss
+               readout_weight * readout_loss + \
+               pruning_weight * pruning_loss
         
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(), 
+            config['training']['gradient_clip']
+        )
         optimizer.step()
         
         # Accumulate losses
@@ -101,15 +90,15 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         
         # Update progress bar
         pbar.set_postfix({
-            'loss': loss.item(),
-            'main': main_loss.item(),
-            'readout': readout_loss.item(),
-            'pruning': pruning_loss.item(),
-            'sparsity': pruning_metrics['avg_near_zero_ratio']
+            'loss': f"{loss.item():.4f}",
+            'main': f"{main_loss.item():.4f}",
+            'readout': f"{readout_loss.item():.4f}",
+            'pruning': f"{pruning_loss.item():.4f}",
+            'sparsity': f"{pruning_metrics['avg_near_zero_ratio']:.3f}"
         })
         
         # Log to wandb
-        if args.use_wandb and batch_idx % args.log_interval == 0:
+        if config['logging']['use_wandb'] and batch_idx % config['logging']['log_interval'] == 0:
             wandb.log({
                 'train/total_loss': loss.item(),
                 'train/main_loss': main_loss.item(),
@@ -130,7 +119,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, args):
+def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, config, device):
     """Evaluate the model"""
     model.eval()
     total_loss = 0
@@ -139,23 +128,28 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
     total_pruning_loss = 0
     
     for input_ids, targets in tqdm(dataloader, desc='Evaluating'):
-        input_ids = input_ids.to(args.device)
-        targets = targets.to(args.device)
+        input_ids = input_ids.to(device)
+        targets = targets.to(device)
         
         # Forward pass
         main_logits, readout_logits, all_hidden_states = model(input_ids)
         
+        vocab_size = main_logits.size(-1)
+        
         # Calculate losses
         main_loss = main_loss_fn(
-            main_logits.reshape(-1, args.vocab_size), 
+            main_logits.reshape(-1, vocab_size), 
             targets.reshape(-1)
         )
         readout_loss, _ = readout_loss_fn(readout_logits, targets)
         pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states)
         
+        readout_weight = config['training']['readout_weight']
+        pruning_weight = config['training']['pruning_weight']
+        
         loss = main_loss + \
-               args.readout_weight * readout_loss + \
-               args.pruning_weight * pruning_loss
+               readout_weight * readout_loss + \
+               pruning_weight * pruning_loss
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()
@@ -176,23 +170,71 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
 def main():
     args = parse_args()
     
+    # Load config
+    config = load_config(args.config)
+    print(f"Loaded config from {args.config}")
+    
+    # Set device
+    device = torch.device(config.get('device', 'cuda') if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Set seed
+    torch.manual_seed(config.get('seed', 42))
+    
     # Initialize wandb
-    if args.use_wandb:
-        wandb.init(project=args.project_name, config=vars(args))
+    if config['logging']['use_wandb']:
+        wandb.init(
+            project=config['logging']['project_name'], 
+            config=config
+        )
     
     # Create save directory
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(config['logging']['save_dir'], exist_ok=True)
     
     # Initialize model
+    print("\n" + "="*80)
+    print("Initializing model...")
+    print("="*80)
+    
+    model_config = config['model']
     model = Samba(
-        vocab_size=args.vocab_size,
-        d_model=args.d_model,
-        n_layers=args.n_layers,
-        d_state=args.d_state,
-        expand_factor=args.expand_factor
-    ).to(args.device)
+        vocab_size=model_config['vocab_size'],
+        d_model=model_config['d_model'],
+        n_layers=model_config['n_layers'],
+        d_state=model_config['d_state'],
+        d_conv=model_config['d_conv'],
+        expand_factor=model_config['expand_factor'],
+        dt_rank=model_config.get('dt_rank', 'auto'),
+        readout_hidden_dim=model_config['readout_hidden_dim']
+    ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    
+    # Load pretrained weights
+    if config['pretrained']['use_pretrained'] and not args.no_pretrained:
+        print("\n" + "="*80)
+        print("Loading pretrained weights...")
+        print("="*80)
+        
+        model.mamba = load_pretrained_mamba(
+            model.mamba,
+            config['pretrained']['model_name']
+        )
+        
+        # Verify weights
+        verify_weight_match(
+            model.mamba,
+            config['pretrained']['model_name']
+        )
+        
+        # Freeze backbone if specified
+        if config['pretrained']['freeze_backbone']:
+            print("Freezing Mamba backbone...")
+            for param in model.mamba.parameters():
+                param.requires_grad = False
+            print("✓ Backbone frozen (only readout will be trained)")
+    else:
+        print("\n⚠️ Training from scratch (no pretrained weights)")
     
     # Initialize losses
     main_loss_fn = nn.CrossEntropyLoss()
@@ -200,39 +242,58 @@ def main():
     pruning_loss_fn = PruningLossWithMetrics()
     
     # Initialize optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=config['training']['lr'],
+        weight_decay=config['training']['weight_decay']
+    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=config['training']['epochs'])
     
     # Get dataloaders
-    train_loader, val_loader = get_dataloaders(
-        vocab_size=args.vocab_size,
-        seq_len=args.seq_len,
-        batch_size=args.batch_size
-    )
+    print("\n" + "="*80)
+    print("Loading dataset...")
+    print("="*80)
+    
+    dataset_config = {
+        **config['dataset'],
+        'batch_size': config['training']['batch_size']
+    }
+    
+    train_loader, val_loader = get_wikitext_dataloaders(dataset_config)
+    
+    print(f"✓ Dataset loaded: {config['dataset']['name']}")
+    print(f"✓ Train batches: {len(train_loader)}")
+    print(f"✓ Val batches: {len(val_loader)}")
     
     # Training loop
+    print("\n" + "="*80)
+    print("Starting training...")
+    print("="*80)
+    
     best_val_loss = float('inf')
     
-    for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+    for epoch in range(config['training']['epochs']):
+        print(f"\n{'='*80}")
+        print(f"Epoch {epoch + 1}/{config['training']['epochs']}")
+        print(f"{'='*80}")
         
         # Train
         train_loss, train_main, train_readout, train_pruning = train_epoch(
             model, train_loader, optimizer, main_loss_fn, 
-            readout_loss_fn, pruning_loss_fn, args, epoch
+            readout_loss_fn, pruning_loss_fn, config, epoch, device
         )
         
         # Evaluate
         val_loss, val_main, val_readout, val_pruning, sparsity_stats = evaluate(
             model, val_loader, main_loss_fn, readout_loss_fn, 
-            pruning_loss_fn, args
+            pruning_loss_fn, config, device
         )
         
         # Update scheduler
         scheduler.step()
         
         # Print results
-        print(f"Train Loss: {train_loss:.4f} (Main: {train_main:.4f}, "
+        print(f"\nTrain Loss: {train_loss:.4f} (Main: {train_main:.4f}, "
               f"Readout: {train_readout:.4f}, Pruning: {train_pruning:.4f})")
         print(f"Val Loss: {val_loss:.4f} (Main: {val_main:.4f}, "
               f"Readout: {val_readout:.4f}, Pruning: {val_pruning:.4f})")
@@ -240,7 +301,7 @@ def main():
               f"L1: {sparsity_stats['avg_l1_norm']:.4f}")
         
         # Log to wandb
-        if args.use_wandb:
+        if config['logging']['use_wandb']:
             wandb.log({
                 'epoch': epoch,
                 'val/total_loss': val_loss,
@@ -255,19 +316,22 @@ def main():
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            save_path = os.path.join(args.save_dir, 'best_model.pt')
+            save_path = os.path.join(config['logging']['save_dir'], 'best_model.pt')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'sparsity_stats': sparsity_stats,
-                'args': vars(args)
+                'config': config
             }, save_path)
-            print(f"Saved best model to {save_path}")
+            print(f"✓ Saved best model to {save_path}")
     
-    print("\nTraining completed!")
-    if args.use_wandb:
+    print("\n" + "="*80)
+    print("Training completed!")
+    print("="*80)
+    
+    if config['logging']['use_wandb']:
         wandb.finish()
 
 

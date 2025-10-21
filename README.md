@@ -1,6 +1,14 @@
-# Samba: Sparse Mamba
+# Samba: Sparse Mamba (130M Parameters)
 
 **Samba** (Sparse Mamba) explores whether neural language models can use sparse representations efficiently, inspired by the sparse coding observed in biological neural systems.
+
+## ✨ Features
+
+- 🎯 **130M Parameters** - Compatible with HuggingFace Mamba-130m
+- 🔄 **Pretrained Weights** - Load from `state-spaces/mamba-130m-hf`
+- 📊 **WikiText-2 Dataset** - Standard language modeling benchmark
+- ⚙️ **Config-based Training** - YAML configuration for easy experimentation
+- 🧠 **Sparsity Analysis** - Track and analyze SSM hidden state sparsity
 
 ## Motivation
 
@@ -14,7 +22,7 @@ Most state-of-the-art NLP models use dense representations, but the brain proces
 
 ### Model Architecture
 
-- **Base**: Mamba model with multiple layers
+- **Base**: Mamba-130m (768d, 24 layers) - HuggingFace compatible
 - **Readout**: MLP that aggregates all hidden states into a dense vector
 - **Dual outputs**: 
   - Main output from Mamba (for maintaining original performance)
@@ -38,24 +46,8 @@ Total Loss = Main Loss + α × Readout Loss + λ × Pruning Loss
 ```
 
 Where:
-- `α` (readout_weight): balances semantic preservation
-- `λ` (pruning_weight): controls sparsity level
-
-## Project Structure
-
-```
-samba/
-├── model/
-│   ├── mamba.py          # Base Mamba implementation
-│   └── samba.py          # Samba with MLP readout
-├── loss/
-│   ├── readout_loss.py   # Auxiliary loss for dense vector
-│   └── pruning_loss.py   # L1 sparsity regularization
-├── utils/
-│   └── data.py           # Data loading utilities
-├── train.py              # Training script
-└── requirements.txt
-```
+- `α` (readout_weight): balances semantic preservation (default: 0.5)
+- `λ` (pruning_weight): controls sparsity level (default: 0.05)
 
 ## Installation
 
@@ -63,41 +55,112 @@ samba/
 pip install -r requirements.txt
 ```
 
+Required packages:
+- `torch>=2.0.0`
+- `transformers>=4.39.0` (for pretrained Mamba)
+- `datasets>=2.14.0` (for WikiText-2)
+- `pyyaml>=6.0` (for config)
+
 ## Usage
 
-### Quick Start (Dummy Data)
+### 1. Quick Start with Config
 
 ```bash
-python train.py \
-    --vocab_size 10000 \
-    --d_model 256 \
-    --n_layers 4 \
-    --batch_size 32 \
-    --seq_len 128 \
-    --epochs 10 \
-    --readout_weight 0.5 \
-    --pruning_weight 0.1
+# Train with pretrained weights (recommended)
+python train.py --config config/config.yaml
+
+# Train from scratch
+python train.py --config config/config.yaml --no-pretrained
 ```
 
-### With W&B Logging
+### 2. Configuration
 
+Edit `config/config.yaml` to customize:
+
+```yaml
+# Model (130M parameters - HuggingFace compatible)
+model:
+  vocab_size: 50280
+  d_model: 768
+  n_layers: 24
+  d_state: 16
+  d_conv: 4
+  expand_factor: 2
+
+# Pretrained
+pretrained:
+  use_pretrained: true
+  model_name: "state-spaces/mamba-130m-hf"
+  freeze_backbone: false
+
+# Training
+training:
+  batch_size: 16
+  seq_len: 512
+  epochs: 10
+  lr: 5e-5
+  readout_weight: 0.5  # α
+  pruning_weight: 0.05  # λ
+
+# Dataset
+dataset:
+  name: "wikitext"
+  config_name: "wikitext-2-raw-v1"
+  tokenizer: "gpt2"
+```
+
+### 3. Monitoring with W&B
+
+```yaml
+# In config.yaml
+logging:
+  use_wandb: true
+  project_name: "samba"
+```
+
+Then run:
 ```bash
-python train.py \
-    --use_wandb \
-    --project_name samba \
-    --readout_weight 0.5 \
-    --pruning_weight 0.1
+python train.py --config config/config.yaml
 ```
 
-### Key Hyperparameters
+## Project Structure
 
-- `--readout_weight` (α): Weight for readout loss (default: 0.5)
-  - Higher → stronger semantic preservation
-  - Lower → more freedom for main model
-  
-- `--pruning_weight` (λ): Weight for pruning loss (default: 0.1)
-  - Higher → more aggressive sparsity
-  - Lower → denser representations
+```
+samba/
+├── config/
+│   └── config.yaml       # Configuration file
+├── model/
+│   ├── mamba.py          # Mamba-130m (HF compatible)
+│   └── samba.py          # Samba with readout
+├── loss/
+│   ├── readout_loss.py   # Readout loss
+│   └── pruning_loss.py   # Pruning loss (L1)
+├── utils/
+│   ├── data.py           # WikiText-2 dataloader
+│   └── pretrained_loader.py  # Load HF weights
+├── train.py              # Training script
+└── requirements.txt
+```
+
+## Model Details
+
+### Architecture Specifications
+
+```python
+Samba-130M:
+- Vocabulary: 50,280 (GPT-2 tokenizer)
+- Hidden Size: 768
+- Layers: 24 Mamba blocks
+- SSM State: 16
+- Parameters: ~130M (base) + ~50M (readout) = ~180M total
+```
+
+### Pretrained Weights
+
+Loads weights from HuggingFace `state-spaces/mamba-130m-hf`:
+- Trained on The Pile (300B tokens)
+- Compatible architecture
+- Automatic weight verification
 
 ## Research Questions
 
@@ -110,21 +173,21 @@ python train.py \
 3. **Do sparse representations preserve semantic information?**
    - Measure: Readout accuracy (how well the dense vector predicts)
 
-## Results
+## Expected Results
 
-(To be filled after experiments)
+With proper hyperparameter tuning:
+- **Target Sparsity**: 40-60% of hidden states near zero
+- **Performance**: <10% degradation from baseline
+- **Readout Accuracy**: Within 5% of main output
 
-- **Sparsity achieved**: X% of hidden state values near zero
-- **Performance**: Y% of baseline Mamba performance
-- **Efficiency**: Z% reduction in active parameters
+## Hyperparameter Tuning Guide
 
-## Future Work
-
-- [ ] Test on real language modeling datasets (WikiText, PTB)
-- [ ] Compare with other sparsity methods (magnitude pruning, top-k)
-- [ ] Analyze learned sparse patterns
-- [ ] Investigate computational efficiency gains
-- [ ] Extend to larger models
+| Parameter | Range | Effect |
+|-----------|-------|--------|
+| `readout_weight` (α) | 0.3-0.7 | Higher = better semantic preservation |
+| `pruning_weight` (λ) | 0.01-0.1 | Higher = more aggressive sparsity |
+| `learning_rate` | 1e-5 to 5e-5 | Lower if using pretrained |
+| `batch_size` | 8-32 | Depends on GPU memory |
 
 ## Citation
 

@@ -1,5 +1,5 @@
 """
-Samba: Sparse Mamba
+Samba: Sparse Mamba (130M parameters)
 Mamba with MLP readout for sparse representation learning
 """
 
@@ -65,18 +65,20 @@ class SambaReadout(nn.Module):
 
 class Samba(nn.Module):
     """
-    Samba: Sparse Mamba
+    Samba: Sparse Mamba (130M parameters, HuggingFace compatible)
     
     Combines Mamba with MLP readout to learn sparse representations.
     """
     
     def __init__(
         self, 
-        vocab_size, 
-        d_model=256, 
-        n_layers=4, 
+        vocab_size=50280, 
+        d_model=768, 
+        n_layers=24, 
         d_state=16,
+        d_conv=4,
         expand_factor=2,
+        dt_rank="auto",
         readout_hidden_dim=512
     ):
         super().__init__()
@@ -87,7 +89,9 @@ class Samba(nn.Module):
             d_model=d_model,
             n_layers=n_layers,
             d_state=d_state,
-            expand_factor=expand_factor
+            d_conv=d_conv,
+            expand_factor=expand_factor,
+            dt_rank=dt_rank
         )
         
         # MLP readout

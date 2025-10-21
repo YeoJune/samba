@@ -4,13 +4,12 @@
 
 ## ✨ Features
 
-- 🎯 **161M Parameters** - Mamba backbone (129M) + Attention readout (32M)
+- 🎯 **168M Parameters** - Mamba backbone (129M) + Efficient readout (38M)
 - 🔄 **Pretrained Weights** - Load from `state-spaces/mamba-130m-hf`
-- 🧠 **Attention-based Readout** - Adaptive layer aggregation with minimal information loss
+- ⚡ **Efficient Readout** - Mean pooling + stride sampling (75% VRAM reduction)
 - 📊 **WikiText-2 Dataset** - Standard language modeling benchmark
 - ⚙️ **Config-based Training** - YAML configuration for easy experimentation
 - 🔍 **Sparsity Analysis** - Track and analyze SSM hidden state sparsity
-- 📈 **Interpretability** - Visualize which layers contribute to predictions
 
 ## Motivation
 
@@ -25,13 +24,14 @@ Most state-of-the-art NLP models use dense representations, but the brain proces
 ### Model Architecture
 
 - **Base**: Mamba-130m (768d, 24 layers) - HuggingFace compatible
-- **Readout**: Attention-based aggregation of all hidden states
-  - Query/Key networks: Learn which layers are relevant
-  - Value network: Transform layer representations  
-  - Adaptive: Different timesteps attend to different layers
+- **Readout**: Efficient mean pooling with stride sampling
+  - Mean pool across 24 layers (reduces to single representation)
+  - Stride sampling (e.g., stride=4: only compute every 4th timestep)
+  - Linear interpolation to full sequence
+  - 75% VRAM reduction with stride=4
 - **Dual outputs**: 
   - Main output from Mamba (for maintaining original performance)
-  - Readout output from attended representation (for semantic verification)
+  - Readout output from pooled representation (for semantic verification)
 
 ### Loss Functions
 
@@ -91,6 +91,8 @@ model:
   d_state: 16
   d_conv: 4
   expand_factor: 2
+  readout_hidden_dim: 512
+  readout_stride: 4  # Sample every 4 timesteps (75% VRAM reduction)
 
 # Pretrained
 pretrained:
@@ -152,24 +154,24 @@ samba/
 ### Architecture Specifications
 
 ```python
-Samba (161M total):
+Samba (168M total):
 - Vocabulary: 50,280 (GPT-2 tokenizer)
 - Hidden Size: 768
 - Layers: 24 Mamba blocks
 - SSM State: 16
 
 Parameters:
-- Mamba backbone: 129M (80.2%)
-- Attention Readout: 32M (19.8%)
-  - Query/Key: 6M (attention mechanism)
-  - Value: 13M (layer transformation)
-  - Output: 13M (vocab projection)
-- Total: ~161M parameters
+- Mamba backbone: 129M (77.1%)
+- Efficient Readout: 38M (22.9%)
+  - Layer 1: 13M (state → hidden)
+  - Layer 2: 26M (hidden → vocab)
+- Total: ~168M parameters
 
 Readout Design:
-- Attention-based: Adaptive layer selection
-- Minimal bottleneck: Preserves layer-specific info
-- Interpretable: Can visualize layer importance
+- Mean pooling: Simple aggregation across layers
+- Stride sampling: Process every Nth timestep (default: 4)
+- VRAM savings: 75% reduction in readout computation
+- Trade-off: Simpler than attention, but VRAM-friendly
 ```
 
 ### Pretrained Weights

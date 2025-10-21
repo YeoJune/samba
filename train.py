@@ -52,11 +52,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         targets = targets.to(device)
         
         # Forward pass
-        outputs = model(input_ids)
-        if len(outputs) == 4:
-            main_logits, readout_logits, all_hidden_states, _ = outputs
-        else:
-            main_logits, readout_logits, all_hidden_states = outputs
+        main_logits, readout_logits, all_hidden_states, sampled_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -67,7 +63,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         )
         
         readout_loss, readout_metrics = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states)
+        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states, sampled_indices)
         
         # Combined loss
         readout_weight = config['training']['readout_weight']
@@ -136,11 +132,7 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
         targets = targets.to(device)
         
         # Forward pass
-        outputs = model(input_ids)
-        if len(outputs) == 4:
-            main_logits, readout_logits, all_hidden_states, _ = outputs
-        else:
-            main_logits, readout_logits, all_hidden_states = outputs
+        main_logits, readout_logits, all_hidden_states, sampled_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -150,7 +142,7 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
             targets.reshape(-1)
         )
         readout_loss, _ = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states)
+        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states, sampled_indices)
         
         readout_weight = config['training']['readout_weight']
         pruning_weight = config['training']['pruning_weight']
@@ -213,7 +205,8 @@ def main():
         d_conv=model_config['d_conv'],
         expand_factor=model_config['expand_factor'],
         dt_rank=model_config.get('dt_rank', 'auto'),
-        readout_hidden_dim=model_config['readout_hidden_dim']
+        readout_hidden_dim=model_config['readout_hidden_dim'],
+        readout_stride=model_config.get('readout_stride', 4)
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")

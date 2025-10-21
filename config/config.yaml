@@ -11,9 +11,8 @@ model:
   dt_rank: 48        # Delta rank (ceil(d_model / 16))
   
   # Readout configuration
-  readout_type: "efficient_mean"  # Options: linear, selected_layers, bottleneck, weighted, efficient_mean
-  readout_hidden_dim: 1024  # For efficient_mean and bottleneck
-  readout_selected_layers: [0, 8, 16, 23]  # For selected_layers (null for auto)
+  readout_hidden_dim: 512  # Hidden dimension for readout MLP
+  readout_stride: 4  # Sample every N timesteps (reduces VRAM usage)
 
 # Pretrained Model
 pretrained:

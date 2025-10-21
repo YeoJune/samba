@@ -41,29 +41,39 @@ class PruningLoss(nn.Module):
 
 
 class PruningLossWithMetrics(PruningLoss):
-    """Pruning loss with sparsity metrics"""
+    """Pruning loss with sparsity metrics - only on sampled timesteps"""
     
-    def forward(self, all_hidden_states, threshold=1e-3):
+    def forward(self, all_hidden_states, sampled_indices=None, threshold=1e-3):
         """
+        Args:
+            sampled_indices: list of timesteps to compute L1 loss on (saves VRAM)
         Returns:
             loss: scalar L1 norm
             metrics: dict with sparsity statistics
         """
-        loss = super().forward(all_hidden_states)
-        
-        # Calculate sparsity metrics
+        total_l1 = 0.0
         total_near_zero = 0.0
         total_l0 = 0.0
         num_layers = len(all_hidden_states)
         
         for hidden_states in all_hidden_states:
-            # Near-zero ratio (below threshold)
+            # Sample timesteps if provided
+            if sampled_indices is not None:
+                hidden_states = hidden_states[:, sampled_indices, :, :]
+            
+            # L1 loss
+            l1 = torch.abs(hidden_states).mean()
+            total_l1 += l1
+            
+            # Near-zero ratio
             near_zero = (hidden_states.abs() < threshold).float().mean()
             total_near_zero += near_zero
             
-            # L0 norm (actual zeros)
+            # L0 norm
             l0 = (hidden_states == 0).float().mean()
             total_l0 += l0
+        
+        loss = total_l1 / num_layers
         
         metrics = {
             'avg_near_zero_ratio': (total_near_zero / num_layers).item(),

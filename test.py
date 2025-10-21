@@ -1,6 +1,7 @@
 """
 Sanity check script for Samba
 Quick test to verify model forward pass and loss computation
+Tests new chunked mamba-ssm architecture
 """
 
 import torch
@@ -10,42 +11,55 @@ from loss.pruning_loss import PruningLossWithMetrics
 
 
 def test_model_forward():
-    """Test model forward pass"""
+    """Test model forward pass (new chunked architecture)"""
     print("Testing model forward pass...")
     
-    # Small model for testing
+    # Small model for testing (must be divisible by readout_stride)
     vocab_size = 100
     batch_size = 4
     seq_len = 16
     
-    model = Samba(
-        vocab_size=vocab_size,
-        d_model=64,
-        n_layers=2,
-        d_state=8,
-        expand_factor=2
-    )
+    print("⚠️ Note: This test requires mamba-ssm to be installed")
+    print("   Install with: pip install mamba-ssm causal-conv1d\n")
+    
+    try:
+        model = Samba(
+            vocab_size=vocab_size,
+            d_model=64,
+            n_layers=8,  # 8 layers = 2 chunks with stride=4
+            d_state=8,
+            expand_factor=2,
+            readout_stride=4,  # 2 chunks
+            use_cuda=True
+        )
+    except ImportError as e:
+        print(f"❌ Error: {e}")
+        print("Skipping test (mamba-ssm not installed)")
+        return None, None, None, None, None, None
     
     # Random input
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
     
-    # Forward pass
-    main_logits, readout_logits, all_hidden_states = model(input_ids)
+    # Forward pass (new API returns 4 values)
+    main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
     
     print(f"✓ Main logits shape: {main_logits.shape}")
     print(f"✓ Readout logits shape: {readout_logits.shape}")
-    print(f"✓ Number of hidden state layers: {len(all_hidden_states)}")
-    print(f"✓ Hidden state shape (per layer): {all_hidden_states[0].shape}")
+    print(f"✓ Number of sampled layers (chunks): {len(sampled_layer_outputs)}")
+    print(f"✓ Layer output shape (per chunk): {sampled_layer_outputs[0].shape}")
+    print(f"✓ Sampled layer indices: {sampled_layer_indices}")
     
     assert main_logits.shape == (batch_size, seq_len, vocab_size)
     assert readout_logits.shape == (batch_size, seq_len, vocab_size)
+    assert len(sampled_layer_outputs) == 2  # 2 chunks
+    assert sampled_layer_outputs[0].shape == (batch_size, seq_len, 64)  # d_model=64
     
     print("✓ Model forward pass successful!\n")
-    return model, input_ids, main_logits, readout_logits, all_hidden_states
+    return model, input_ids, main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices
 
 
-def test_losses(model, input_ids, main_logits, readout_logits, all_hidden_states):
-    """Test loss computation"""
+def test_losses(model, input_ids, main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices):
+    """Test loss computation (new API with sampled layer outputs)"""
     print("Testing loss computation...")
     
     vocab_size = main_logits.shape[-1]
@@ -62,9 +76,9 @@ def test_losses(model, input_ids, main_logits, readout_logits, all_hidden_states
     print(f"✓ Readout loss: {readout_loss.item():.4f}")
     print(f"  - Readout accuracy: {readout_metrics['readout_accuracy']:.4f}")
     
-    # Pruning loss
+    # Pruning loss (uses sampled layer outputs, not hidden states)
     pruning_loss_fn = PruningLossWithMetrics()
-    pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states)
+    pruning_loss, pruning_metrics = pruning_loss_fn(sampled_layer_outputs, sampled_layer_indices)
     print(f"✓ Pruning loss (L1): {pruning_loss.item():.4f}")
     print(f"  - Near-zero ratio: {pruning_metrics['avg_near_zero_ratio']:.4f}")
     print(f"  - L0 sparsity: {pruning_metrics['avg_l0_sparsity']:.4f}")
@@ -80,15 +94,26 @@ def test_losses(model, input_ids, main_logits, readout_logits, all_hidden_states
 
 
 def test_backward():
-    """Test backward pass"""
+    """Test backward pass (new chunked architecture)"""
     print("Testing backward pass...")
     
-    model = Samba(vocab_size=100, d_model=64, n_layers=2)
+    try:
+        model = Samba(
+            vocab_size=100, 
+            d_model=64, 
+            n_layers=8,  # 2 chunks with stride=4
+            readout_stride=4,
+            use_cuda=True
+        )
+    except ImportError:
+        print("⚠️ Skipping backward test (mamba-ssm not installed)")
+        return
+    
     input_ids = torch.randint(0, 100, (4, 16))
     targets = torch.randint(0, 100, (4, 16))
     
-    # Forward
-    main_logits, readout_logits, all_hidden_states = model(input_ids)
+    # Forward (new API)
+    main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
     
     # Loss
     main_loss = torch.nn.functional.cross_entropy(
@@ -99,7 +124,8 @@ def test_backward():
         readout_logits.reshape(-1, 100), 
         targets.reshape(-1)
     )
-    pruning_loss = sum(h.abs().mean() for h in all_hidden_states) / len(all_hidden_states)
+    # Pruning loss on layer outputs (not hidden states)
+    pruning_loss = sum(h.abs().mean() for h in sampled_layer_outputs) / len(sampled_layer_outputs)
     
     total_loss = main_loss + 0.5 * readout_loss + 0.1 * pruning_loss
     
@@ -115,24 +141,32 @@ def test_backward():
 
 
 def test_sparsity_stats():
-    """Test sparsity statistics"""
+    """Test sparsity statistics (new API with sampled layer outputs)"""
     print("Testing sparsity statistics...")
     
-    model = Samba(vocab_size=100, d_model=64, n_layers=2)
+    try:
+        model = Samba(
+            vocab_size=100, 
+            d_model=64, 
+            n_layers=8,
+            readout_stride=4,
+            use_cuda=True
+        )
+    except ImportError:
+        print("⚠️ Skipping sparsity test (mamba-ssm not installed)")
+        return
+    
     input_ids = torch.randint(0, 100, (4, 16))
     
-    _, _, all_hidden_states = model(input_ids)
+    # Forward (new API)
+    _, _, sampled_layer_outputs, _ = model(input_ids)
     
-    stats = model.get_sparsity_stats(all_hidden_states)
+    # Get sparsity stats from model
+    stats = model.get_sparsity_stats(sampled_layer_outputs)
     
     print("Sparsity statistics:")
-    for layer_name, layer_stats in stats.items():
-        if isinstance(layer_stats, dict):
-            print(f"  {layer_name}:")
-            for k, v in layer_stats.items():
-                print(f"    {k}: {v:.4f}")
-    
     print(f"  Average near-zero ratio: {stats['avg_near_zero_ratio']:.4f}")
+    print(f"  Average L0 sparsity: {stats['avg_l0_sparsity']:.4f}")
     print(f"  Average L1 norm: {stats['avg_l1_norm']:.4f}")
     
     print("✓ Sparsity statistics successful!\n")
@@ -140,14 +174,20 @@ def test_sparsity_stats():
 
 def main():
     print("=" * 60)
-    print("Samba Sanity Check")
+    print("Samba Sanity Check (Chunked mamba-ssm Architecture)")
     print("=" * 60 + "\n")
     
     # Test 1: Forward pass
-    model, input_ids, main_logits, readout_logits, all_hidden_states = test_model_forward()
+    result = test_model_forward()
+    if result[0] is None:
+        print("\n⚠️ Tests skipped - mamba-ssm not installed")
+        print("Install with: pip install mamba-ssm causal-conv1d")
+        return
+    
+    model, input_ids, main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = result
     
     # Test 2: Loss computation
-    test_losses(model, input_ids, main_logits, readout_logits, all_hidden_states)
+    test_losses(model, input_ids, main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices)
     
     # Test 3: Backward pass
     test_backward()

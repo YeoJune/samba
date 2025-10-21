@@ -9,29 +9,29 @@ import torch.nn as nn
 
 class PruningLoss(nn.Module):
     """
-    L1 regularization on hidden states
+    L1 regularization on layer outputs
     
-    Encourages the model to use sparse representations in hidden states,
+    Encourages the model to use sparse representations in layer outputs,
     mimicking the sparse coding observed in biological neural systems.
     """
     
     def __init__(self):
         super().__init__()
     
-    def forward(self, all_hidden_states):
+    def forward(self, sampled_layer_outputs):
         """
         Args:
-            all_hidden_states: list of (batch, seq_len, d_inner, d_state) tensors
+            sampled_layer_outputs: list of (batch, seq_len, d_model) tensors
             
         Returns:
             loss: scalar L1 norm
         """
         total_l1 = 0.0
-        num_layers = len(all_hidden_states)
+        num_layers = len(sampled_layer_outputs)
         
-        for hidden_states in all_hidden_states:
+        for layer_output in sampled_layer_outputs:
             # L1 norm: sum of absolute values
-            l1 = torch.abs(hidden_states).mean()
+            l1 = torch.abs(layer_output).mean()
             total_l1 += l1
         
         # Average over layers
@@ -43,10 +43,11 @@ class PruningLoss(nn.Module):
 class PruningLossWithMetrics(PruningLoss):
     """Pruning loss with sparsity metrics - only on sampled layers"""
     
-    def forward(self, sampled_hidden_states, sampled_layer_indices=None, threshold=1e-3):
+    def forward(self, sampled_layer_outputs, sampled_layer_indices=None, threshold=1e-3):
         """
         Args:
-            sampled_hidden_states: list of hidden states from sampled layers only
+            sampled_layer_outputs: list of layer outputs from sampled layers only
+                                   [(batch, seq_len, d_model), ...]
             sampled_layer_indices: layer indices (unused, for API compatibility)
         Returns:
             loss: scalar L1 norm
@@ -55,19 +56,19 @@ class PruningLossWithMetrics(PruningLoss):
         total_l1 = 0.0
         total_near_zero = 0.0
         total_l0 = 0.0
-        num_layers = len(sampled_hidden_states)
+        num_layers = len(sampled_layer_outputs)
         
-        for hidden_states in sampled_hidden_states:
+        for layer_output in sampled_layer_outputs:
             # L1 loss
-            l1 = torch.abs(hidden_states).mean()
+            l1 = torch.abs(layer_output).mean()
             total_l1 += l1
             
             # Near-zero ratio
-            near_zero = (hidden_states.abs() < threshold).float().mean()
+            near_zero = (layer_output.abs() < threshold).float().mean()
             total_near_zero += near_zero
             
             # L0 norm
-            l0 = (hidden_states == 0).float().mean()
+            l0 = (layer_output == 0).float().mean()
             total_l0 += l0
         
         loss = total_l1 / num_layers
@@ -94,18 +95,20 @@ class AdaptivePruningLoss(nn.Module):
         self.adaptation_rate = adaptation_rate
         self.register_buffer('lambda_', torch.tensor(1.0))
     
-    def forward(self, all_hidden_states, threshold=1e-3):
+    def forward(self, sampled_layer_outputs, threshold=1e-3):
         """
+        Args:
+            sampled_layer_outputs: list of layer outputs from sampled layers
         Returns:
             loss: scalar adaptive L1 norm
             metrics: dict with sparsity statistics and lambda
         """
         # Calculate current sparsity
         total_near_zero = 0.0
-        num_layers = len(all_hidden_states)
+        num_layers = len(sampled_layer_outputs)
         
-        for hidden_states in all_hidden_states:
-            near_zero = (hidden_states.abs() < threshold).float().mean()
+        for layer_output in sampled_layer_outputs:
+            near_zero = (layer_output.abs() < threshold).float().mean()
             total_near_zero += near_zero
         
         current_sparsity = total_near_zero / num_layers
@@ -117,8 +120,8 @@ class AdaptivePruningLoss(nn.Module):
         
         # Calculate L1 loss
         total_l1 = 0.0
-        for hidden_states in all_hidden_states:
-            l1 = torch.abs(hidden_states).mean()
+        for layer_output in sampled_layer_outputs:
+            l1 = torch.abs(layer_output).mean()
             total_l1 += l1
         
         avg_l1 = total_l1 / num_layers

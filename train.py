@@ -17,7 +17,7 @@ from model.samba import Samba
 from loss.readout_loss import ReadoutLossWithMetrics
 from loss.pruning_loss import PruningLossWithMetrics
 from utils.data import get_wikitext_dataloaders
-from utils.pretrained_loader import load_pretrained_mamba, verify_weight_match
+from utils.pretrained_loader import load_pretrained_samba, verify_samba_weights
 
 
 def load_config(config_path):
@@ -51,8 +51,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (returns sampled hidden states only)
-        main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices = model(input_ids)
+        # Forward pass (returns sampled layer outputs only)
+        main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -63,7 +63,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         )
         
         readout_loss, readout_metrics = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_hidden_states, sampled_layer_indices)
+        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_layer_outputs, sampled_layer_indices)
         
         # Combined loss
         readout_weight = config['training']['readout_weight']
@@ -131,8 +131,8 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (returns sampled hidden states only)
-        main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices = model(input_ids)
+        # Forward pass (returns sampled layer outputs only)
+        main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -142,7 +142,7 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
             targets.reshape(-1)
         )
         readout_loss, _ = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_hidden_states, sampled_layer_indices)
+        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_layer_outputs, sampled_layer_indices)
         
         readout_weight = config['training']['readout_weight']
         pruning_weight = config['training']['pruning_weight']
@@ -161,8 +161,8 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
     avg_readout_loss = total_readout_loss / len(dataloader)
     avg_pruning_loss = total_pruning_loss / len(dataloader)
     
-    # Get sparsity stats from sampled hidden states
-    sparsity_stats = model.get_sparsity_stats(sampled_hidden_states)
+    # Get sparsity stats from sampled layer outputs
+    sparsity_stats = model.get_sparsity_stats(sampled_layer_outputs)
     
     return avg_loss, avg_main_loss, avg_readout_loss, avg_pruning_loss, sparsity_stats
 
@@ -217,22 +217,23 @@ def main():
         print("Loading pretrained weights...")
         print("="*80)
         
-        model.mamba = load_pretrained_mamba(
-            model.mamba,
+        model = load_pretrained_samba(
+            model,
             config['pretrained']['model_name']
         )
         
         # Verify weights
-        verify_weight_match(
-            model.mamba,
+        verify_samba_weights(
+            model,
             config['pretrained']['model_name']
         )
         
         # Freeze backbone if specified
         if config['pretrained']['freeze_backbone']:
-            print("Freezing Mamba backbone...")
-            for param in model.mamba.parameters():
-                param.requires_grad = False
+            print("Freezing Mamba backbone (chunks)...")
+            for chunk in model.chunks:
+                for param in chunk.parameters():
+                    param.requires_grad = False
             print("✓ Backbone frozen (only readout will be trained)")
     else:
         print("\n⚠️ Training from scratch (no pretrained weights)")

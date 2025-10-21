@@ -9,7 +9,7 @@ from .mamba import Mamba
 
 
 class SambaReadout(nn.Module):
-    """Attention-based readout with stride sampling"""
+    """Attention-based readout with layer stride sampling"""
     
     def __init__(self, d_inner, d_state, n_layers, vocab_size, hidden_dim=512, stride=4):
         super().__init__()
@@ -36,14 +36,15 @@ class SambaReadout(nn.Module):
     def forward(self, all_hidden_states):
         batch, seq_len = all_hidden_states[0].shape[:2]
         
-        # Stack and flatten
-        hidden_flat = torch.stack([h.reshape(batch, seq_len, -1) for h in all_hidden_states], dim=0)
+        # Sample layers with stride
+        sampled_layer_indices = list(range(0, len(all_hidden_states), self.stride))
+        sampled_hidden_states = [all_hidden_states[i] for i in sampled_layer_indices]
         
-        # Sample timesteps with stride
-        sampled_indices = list(range(0, seq_len, self.stride))
+        # Stack and flatten only sampled layers
+        hidden_flat = torch.stack([h.reshape(batch, seq_len, -1) for h in sampled_hidden_states], dim=0)
         
         outputs = []
-        for t in sampled_indices:
+        for t in range(seq_len):
             h_t = hidden_flat[:, :, t, :]
             
             query = self.query_net(h_t.mean(dim=0, keepdim=True))
@@ -56,20 +57,9 @@ class SambaReadout(nn.Module):
             output_t = self.output_proj(aggregated)
             outputs.append(output_t)
         
-        readout_sampled = torch.stack(outputs, dim=1)
+        readout_logits = torch.stack(outputs, dim=1)
         
-        # Interpolate to full length
-        if self.stride > 1:
-            readout_logits = torch.nn.functional.interpolate(
-                readout_sampled.transpose(1, 2),
-                size=seq_len,
-                mode='linear',
-                align_corners=False
-            ).transpose(1, 2)
-        else:
-            readout_logits = readout_sampled
-        
-        return readout_logits, sampled_indices
+        return readout_logits, sampled_layer_indices
 
 
 class Samba(nn.Module):
@@ -125,13 +115,16 @@ class Samba(nn.Module):
         Returns: 
             - main_logits: (batch, seq_len, vocab_size)
             - readout_logits: (batch, seq_len, vocab_size)
-            - all_hidden_states: list of hidden states
-            - sampled_indices: timesteps used for readout (for L1 loss)
+            - sampled_hidden_states: list of sampled layer hidden states (for loss)
+            - sampled_layer_indices: layer indices used for readout and loss
         """
         main_logits, all_hidden_states = self.mamba(input_ids)
-        readout_logits, sampled_indices = self.readout(all_hidden_states)
+        readout_logits, sampled_layer_indices = self.readout(all_hidden_states)
         
-        return main_logits, readout_logits, all_hidden_states, sampled_indices
+        # Return only sampled hidden states to save VRAM
+        sampled_hidden_states = [all_hidden_states[i] for i in sampled_layer_indices]
+        
+        return main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices
     
     def get_sparsity_stats(self, all_hidden_states, threshold=1e-3):
         """

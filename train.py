@@ -51,8 +51,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass
-        main_logits, readout_logits, all_hidden_states, sampled_indices = model(input_ids)
+        # Forward pass (returns sampled hidden states only)
+        main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -63,7 +63,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         )
         
         readout_loss, readout_metrics = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states, sampled_indices)
+        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_hidden_states, sampled_layer_indices)
         
         # Combined loss
         readout_weight = config['training']['readout_weight']
@@ -131,8 +131,8 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass
-        main_logits, readout_logits, all_hidden_states, sampled_indices = model(input_ids)
+        # Forward pass (returns sampled hidden states only)
+        main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices = model(input_ids)
         
         vocab_size = main_logits.size(-1)
         
@@ -142,7 +142,7 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
             targets.reshape(-1)
         )
         readout_loss, _ = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(all_hidden_states, sampled_indices)
+        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_hidden_states, sampled_layer_indices)
         
         readout_weight = config['training']['readout_weight']
         pruning_weight = config['training']['pruning_weight']
@@ -161,8 +161,8 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
     avg_readout_loss = total_readout_loss / len(dataloader)
     avg_pruning_loss = total_pruning_loss / len(dataloader)
     
-    # Get sparsity stats
-    sparsity_stats = model.get_sparsity_stats(all_hidden_states)
+    # Get sparsity stats from sampled hidden states
+    sparsity_stats = model.get_sparsity_stats(sampled_hidden_states)
     
     return avg_loss, avg_main_loss, avg_readout_loss, avg_pruning_loss, sparsity_stats
 

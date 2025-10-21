@@ -41,12 +41,13 @@ class PruningLoss(nn.Module):
 
 
 class PruningLossWithMetrics(PruningLoss):
-    """Pruning loss with sparsity metrics - only on sampled timesteps"""
+    """Pruning loss with sparsity metrics - only on sampled layers"""
     
-    def forward(self, all_hidden_states, sampled_indices=None, threshold=1e-3):
+    def forward(self, sampled_hidden_states, sampled_layer_indices=None, threshold=1e-3):
         """
         Args:
-            sampled_indices: list of timesteps to compute L1 loss on (saves VRAM)
+            sampled_hidden_states: list of hidden states from sampled layers only
+            sampled_layer_indices: layer indices (unused, for API compatibility)
         Returns:
             loss: scalar L1 norm
             metrics: dict with sparsity statistics
@@ -54,13 +55,9 @@ class PruningLossWithMetrics(PruningLoss):
         total_l1 = 0.0
         total_near_zero = 0.0
         total_l0 = 0.0
-        num_layers = len(all_hidden_states)
+        num_layers = len(sampled_hidden_states)
         
-        for hidden_states in all_hidden_states:
-            # Sample timesteps if provided
-            if sampled_indices is not None:
-                hidden_states = hidden_states[:, sampled_indices, :, :]
-            
+        for hidden_states in sampled_hidden_states:
             # L1 loss
             l1 = torch.abs(hidden_states).mean()
             total_l1 += l1

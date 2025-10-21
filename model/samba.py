@@ -9,15 +9,10 @@ from .mamba import Mamba
 
 
 class SambaReadout(nn.Module):
-    """Attention-based readout with layer stride sampling"""
+    """Attention-based readout (receives pre-sampled hidden states)"""
     
-    def __init__(self, d_inner, d_state, n_layers, vocab_size, hidden_dim=512, stride=4):
+    def __init__(self, d_inner, d_state, vocab_size, hidden_dim=512):
         super().__init__()
-        self.d_inner = d_inner
-        self.d_state = d_state
-        self.n_layers = n_layers
-        self.stride = stride
-        
         state_dim = d_inner * d_state
         
         self.query_net = nn.Sequential(nn.Linear(state_dim, 128), nn.ReLU())
@@ -33,14 +28,14 @@ class SambaReadout(nn.Module):
         
         self.scale = 128 ** -0.5
         
-    def forward(self, all_hidden_states):
-        batch, seq_len = all_hidden_states[0].shape[:2]
+    def forward(self, sampled_hidden_states):
+        """
+        Args:
+            sampled_hidden_states: list of already sampled layer hidden states
+        """
+        batch, seq_len = sampled_hidden_states[0].shape[:2]
         
-        # Sample layers with stride
-        sampled_layer_indices = list(range(0, len(all_hidden_states), self.stride))
-        sampled_hidden_states = [all_hidden_states[i] for i in sampled_layer_indices]
-        
-        # Stack and flatten only sampled layers
+        # Stack and flatten sampled layers
         hidden_flat = torch.stack([h.reshape(batch, seq_len, -1) for h in sampled_hidden_states], dim=0)
         
         outputs = []
@@ -59,7 +54,7 @@ class SambaReadout(nn.Module):
         
         readout_logits = torch.stack(outputs, dim=1)
         
-        return readout_logits, sampled_layer_indices
+        return readout_logits
 
 
 class Samba(nn.Module):
@@ -94,20 +89,19 @@ class Samba(nn.Module):
             dt_rank=dt_rank
         )
         
-        # MLP readout with stride
+        # Readout
         d_inner = d_model * expand_factor
         self.readout = SambaReadout(
             d_inner=d_inner,
             d_state=d_state,
-            n_layers=n_layers,
             vocab_size=vocab_size,
-            hidden_dim=readout_hidden_dim,
-            stride=readout_stride
+            hidden_dim=readout_hidden_dim
         )
         
         self.n_layers = n_layers
         self.d_inner = d_inner
         self.d_state = d_state
+        self.readout_stride = readout_stride
         
     def forward(self, input_ids):
         """
@@ -118,72 +112,52 @@ class Samba(nn.Module):
             - sampled_hidden_states: list of sampled layer hidden states (for loss)
             - sampled_layer_indices: layer indices used for readout and loss
         """
+        # Embedding
+        x = self.mamba.embedding(input_ids)
         
-        # Mamba의 구성 요소 가져오기
-        embedding = self.mamba.embedding
-        layers = self.mamba.layers
-        norm_f = self.mamba.norm_f
-        lm_head = self.mamba.lm_head
-
-        # 1. 임베딩
-        x = embedding(input_ids)
+        # Layer-wise forward with stride sampling (VRAM optimization)
+        sampled_hidden_states = []
+        sampled_layer_indices = list(range(0, self.n_layers, self.readout_stride))
         
-        # 2. 레이어 순회 (VRAM 최적화 핵심)
-        sampled_hidden_states = []  # 샘플링된 6개 텐서만 저장할 리스트
-        layer_indices_for_readout = list(range(0, self.n_layers, self.readout.stride))
-        
-        for i, layer in enumerate(layers):
-            x, hidden_states = layer(x)  # (x는 768, hidden_states는 d_inner*d_state 차원)
+        for i, layer in enumerate(self.mamba.layers):
+            x, hidden_states = layer(x)
             
-            # stride에 해당하는 레이어의 'hidden_states'만 저장
-            if i in layer_indices_for_readout:
+            # Only store hidden states for sampled layers
+            if i in sampled_layer_indices:
                 sampled_hidden_states.append(hidden_states)
-            
-            # (i가 해당하지 않으면, hidden_states는 VRAM에서 해제됨)
         
-        # 3. Mamba의 최종 출력 계산
-        x = norm_f(x)
-        main_logits = lm_head(x)
+        # Main output
+        x = self.mamba.norm_f(x)
+        main_logits = self.mamba.lm_head(x)
         
-        # 4. Readout 계산 (이제 6개 리스트만 받음)
-        readout_logits, _ = self.readout(sampled_hidden_states)
-        
-        # 5. Pruning Loss를 위해 반환
-        sampled_layer_indices = layer_indices_for_readout
+        # Readout output (uses only sampled hidden states)
+        readout_logits = self.readout(sampled_hidden_states)
         
         return main_logits, readout_logits, sampled_hidden_states, sampled_layer_indices
     
-    def get_sparsity_stats(self, all_hidden_states, threshold=1e-3):
+    def get_sparsity_stats(self, sampled_hidden_states, threshold=1e-3):
         """
-        Calculate sparsity statistics of hidden states
+        Calculate sparsity statistics from sampled hidden states
         
         Args:
-            all_hidden_states: list of (batch, seq_len, d_inner, d_state)
+            sampled_hidden_states: list of sampled layer hidden states
             threshold: values below this are considered zero
             
         Returns:
             dict with sparsity metrics
         """
-        stats = {}
+        total_near_zero = 0.0
+        total_l0 = 0.0
+        total_l1 = 0.0
+        num_sampled = len(sampled_hidden_states)
         
-        for i, hidden_states in enumerate(all_hidden_states):
-            # Count near-zero values
-            near_zero = (hidden_states.abs() < threshold).float().mean()
-            
-            # L0 norm (actual zeros)
-            l0 = (hidden_states == 0).float().mean()
-            
-            # L1 norm
-            l1 = hidden_states.abs().mean()
-            
-            stats[f'layer_{i}'] = {
-                'near_zero_ratio': near_zero.item(),
-                'l0_sparsity': l0.item(),
-                'l1_norm': l1.item()
-            }
+        for hidden_states in sampled_hidden_states:
+            total_near_zero += (hidden_states.abs() < threshold).float().mean()
+            total_l0 += (hidden_states == 0).float().mean()
+            total_l1 += hidden_states.abs().mean()
         
-        # Average across layers
-        stats['avg_near_zero_ratio'] = sum(s['near_zero_ratio'] for s in stats.values() if isinstance(s, dict)) / self.n_layers
-        stats['avg_l1_norm'] = sum(s['l1_norm'] for s in stats.values() if isinstance(s, dict)) / self.n_layers
-        
-        return stats
+        return {
+            'avg_near_zero_ratio': (total_near_zero / num_sampled).item(),
+            'avg_l0_sparsity': (total_l0 / num_sampled).item(),
+            'avg_l1_norm': (total_l1 / num_sampled).item()
+        }

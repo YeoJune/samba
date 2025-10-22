@@ -1,9 +1,0 @@
-torch>=2.0.0
-transformers>=4.39.0
-datasets>=2.14.0
-pyyaml>=6.0
-numpy>=1.24.0
-tqdm>=4.65.0
-wandb>=0.15.0
-mamba-ssm>=1.0.0
-causal-conv1d>=1.0.0

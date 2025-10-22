@@ -13,7 +13,6 @@ dependencies:
       - transformers>=4.39
       - datasets>=2.14
       - tokenizers>=0.15
-      - mamba-ssm>=1.0
       - causal-conv1d>=1.0
       - triton>=2.0
       - wandb>=0.15

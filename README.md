@@ -81,27 +81,37 @@ Where:
 
 ## Installation
 
+### Quick Start (Recommended)
+
 ```bash
-# Install dependencies
+# Create conda environment (handles CUDA dependencies automatically)
+conda env create -f environment.yml
+conda activate samba
+
+# Verify installation
+python test.py
+```
+
+### Alternative: Pip Installation
+
+```bash
+# Install PyTorch with CUDA first
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Install other dependencies
 pip install -r requirements.txt
 ```
 
 **Critical Dependencies:**
 
-- `mamba-ssm>=1.0.0` - CUDA kernels for 100x speedup (requires CUDA toolkit)
+- **CUDA Toolkit 12.1+** - Required for mamba-ssm
+- `mamba-ssm>=1.0.0` - CUDA kernels for 100x speedup
 - `causal-conv1d>=1.0.0` - Required by mamba-ssm
+- `triton>=2.0.0` - CUDA compiler for mamba-ssm
 - `torch>=2.0.0` - PyTorch with CUDA support
 - `transformers>=4.39.0` - For pretrained Mamba weights
-- `datasets>=2.14.0` - For WikiText-2
-- `pyyaml>=6.0` - For config files
 
-**Installation Tips:**
-
-```bash
-# If mamba-ssm installation fails, ensure CUDA toolkit is installed
-# CUDA 11.8+ recommended
-pip install mamba-ssm causal-conv1d --no-cache-dir
-```
+📖 **See [INSTALL.md](INSTALL.md) for detailed installation guide and troubleshooting**
 
 ## Usage
 

@@ -1,20 +1,49 @@
 name: samba
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
   - defaults
 
 dependencies:
+  # Python
   - python=3.10
-  - numpy>=1.24
-  - tqdm>=4.65
+
+  # PyTorch with CUDA (critical for mamba-ssm)
+  - pytorch>=2.5.1
+  - pytorch-cuda=12.8
+  - cudatoolkit=12.8
+
+  # Core ML dependencies
+  - numpy>=1.24.0
+  - tqdm>=4.65.0
+
+  # Data processing
   - pyyaml>=6.0
+
+  # Pip dependencies (for packages not available in conda)
   - pip
   - pip:
-      - transformers>=4.39
-      - datasets>=2.14
-      - tokenizers>=0.15
-      - causal-conv1d>=1.0
-      - triton>=2.0
-      - wandb>=0.15
+      # HuggingFace & Datasets
+      - transformers>=4.39.0
+      - datasets>=2.14.0
+      - tokenizers>=0.15.0
+
+      # mamba-ssm (requires CUDA toolkit)
+      - mamba-ssm>=1.0.0
+      - causal-conv1d>=1.0.0
+
+      # Triton (CUDA compiler for mamba-ssm)
+      - triton>=2.0.0
+
+      # Monitoring
+      - wandb>=0.15.0
+
+      # Development
       - ipython
       - jupyter
+# Post-installation notes:
+# 1. Activate: conda activate samba
+# 2. Verify CUDA: python -c "import torch; print(torch.cuda.is_available())"
+# 3. Verify mamba-ssm: python -c "from mamba_ssm import Mamba"
+# 4. Run tests: python test.py

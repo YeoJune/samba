@@ -4,7 +4,7 @@ setup(
     name="samba",
     version="0.1.0",
     packages=find_packages(),
-    python_requires=">=3.10",
+    python_requires=">=3.9",
     install_requires=[
         # Core ML dependencies
         "numpy>=1.24.0",

@@ -11,8 +11,8 @@ dependencies:
 
   # PyTorch with CUDA (critical for mamba-ssm)
   - pytorch>=2.5.1
-  - pytorch-cuda=12.1
-  - cudatoolkit=12.1
+  - pytorch-cuda=11.x
+  - cudatoolkit=11.x
 
   # Core ML dependencies
   - numpy>=1.24.0

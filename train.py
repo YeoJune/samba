@@ -75,11 +75,6 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
             l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
             
-            # Calculate accuracies
-            main_preds = main_logits.argmax(dim=-1)
-            main_acc = (main_preds == targets).float().mean()
-            aux_acc = aux_metrics['aux_accuracy']
-            
             # Combined loss (3-Loss system)
             aux_weight = config['training']['aux_weight']
             l1_weight = config['training']['l1_weight']
@@ -87,6 +82,12 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             loss = main_loss + \
                    aux_weight * aux_loss + \
                    l1_weight * l1_loss
+        
+        # Calculate accuracies (outside autocast, detached from graph)
+        with torch.no_grad():
+            main_preds = main_logits.argmax(dim=-1)
+            main_acc = (main_preds == targets).float().mean().item()
+        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
         
         # Backward pass with AMP
         optimizer.zero_grad()
@@ -112,7 +113,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         total_main_loss += main_loss.item()
         total_aux_loss += aux_loss.item()
         total_l1_loss += l1_loss.item()
-        total_main_acc += main_acc.item()
+        total_main_acc += main_acc
         total_aux_acc += aux_acc
         
         # Update progress bar
@@ -121,7 +122,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             'main': f"{main_loss.item():.4f}",
             'aux': f"{aux_loss.item():.4f}",
             'l1': f"{l1_loss.item():.4f}",
-            'main_acc': f"{main_acc.item():.3f}",
+            'main_acc': f"{main_acc:.3f}",
             'aux_acc': f"{aux_acc:.3f}",
             'sparsity': f"{l1_metrics['avg_near_zero_ratio']:.3f}"
         })
@@ -133,7 +134,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
                 'train/main_loss': main_loss.item(),
                 'train/aux_loss': aux_loss.item(),
                 'train/l1_loss': l1_loss.item(),
-                'train/main_accuracy': main_acc.item(),
+                'train/main_accuracy': main_acc,
                 'train/aux_accuracy': aux_acc,
                 'train/sparsity': l1_metrics['avg_near_zero_ratio'],
                 'train/l1_norm': l1_metrics['l1_loss'],
@@ -189,16 +190,16 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
                    aux_weight * aux_loss + \
                    l1_weight * l1_loss
         
-        # Calculate accuracies (outside autocast to save memory)
+        # Calculate accuracies (outside autocast, already in no_grad context)
         main_preds = main_logits.argmax(dim=-1)
-        main_acc = (main_preds == targets).float().mean()
-        aux_acc = aux_metrics['aux_accuracy']
+        main_acc = (main_preds == targets).float().mean().item()
+        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()
         total_aux_loss += aux_loss.item()
         total_l1_loss += l1_loss.item()
-        total_main_acc += main_acc.item()
+        total_main_acc += main_acc
         total_aux_acc += aux_acc
     
     avg_loss = total_loss / len(dataloader)

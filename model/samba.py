@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from .readouts import SambaReadout
 
+from mamba_ssm import Mamba as MambaCUDA
+MAMBA_SSM_AVAILABLE = True
 try:
     from mamba_ssm import Mamba as MambaCUDA
     MAMBA_SSM_AVAILABLE = True

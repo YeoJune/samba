@@ -287,7 +287,7 @@ def main():
     
     # Initialize AMP scaler
     use_amp = config['training'].get('use_amp', False)
-    scaler = torch.cuda.amp.GradScaler('cuda') if use_amp else None
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
     
     if use_amp:
         print("\n✓ AMP (Automatic Mixed Precision) enabled - FP16 training")

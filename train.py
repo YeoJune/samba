@@ -219,7 +219,8 @@ def main():
         
         model = load_pretrained_samba(
             model,
-            config['pretrained']['model_name']
+            config['pretrained']['model_name'],
+            debug=True  # Show key mapping details
         )
         
         # Verify weights

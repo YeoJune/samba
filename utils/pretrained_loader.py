@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 
-def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-hf"):
+def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-hf", debug=False):
     """
     Load pretrained HuggingFace Mamba weights into Samba model
     
@@ -15,11 +15,12 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     1. Load full 24-layer HF model state_dict
     2. Load embedding, norm_f, lm_head directly to Samba
     3. Load each of 24 layers with direct 1:1 mapping
-    4. Remap prefixes: backbone.layers.{i} → layers.{i}
+    4. Handle HF residual structure (norm + mixer) vs mamba-ssm flat structure
     
     Args:
         samba_model: Samba model instance (with 24 individual layers)
         pretrained_name: HuggingFace model name
+        debug: Print debug information about key mapping
         
     Returns:
         samba_model: Model with loaded weights
@@ -33,20 +34,17 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     hf_model = AutoModelForCausalLM.from_pretrained(pretrained_name)
     hf_state_dict = hf_model.state_dict()
     
-    # Debug: Show HF model structure
-    print("\n🔍 HuggingFace model structure (first layer keys):")
-    layer_0_keys = [k for k in hf_state_dict.keys() if k.startswith("backbone.layers.0.")]
-    for key in sorted(layer_0_keys)[:10]:
-        print(f"  - {key}")
-    if len(layer_0_keys) > 10:
-        print(f"  ... and {len(layer_0_keys) - 10} more keys")
-    
-    print("\n🔍 mamba-ssm model structure (first layer keys):")
-    mamba_keys = list(samba_model.layers[0].state_dict().keys())
-    for key in sorted(mamba_keys)[:10]:
-        print(f"  - {key}")
-    if len(mamba_keys) > 10:
-        print(f"  ... and {len(mamba_keys) - 10} more keys")
+    if debug:
+        # Debug: Show HF model structure
+        print("\n🔍 HuggingFace model structure (first layer keys):")
+        layer_0_keys = [k for k in hf_state_dict.keys() if k.startswith("backbone.layers.0.")]
+        for key in sorted(layer_0_keys):
+            print(f"  - {key}: {hf_state_dict[key].shape}")
+        
+        print("\n🔍 mamba-ssm model structure (first layer keys):")
+        mamba_keys = list(samba_model.layers[0].state_dict().keys())
+        for key in sorted(mamba_keys):
+            print(f"  - {key}: {samba_model.layers[0].state_dict()[key].shape}")
     
     print("\nCopying weights to Samba model (24 layers)...")
     
@@ -56,14 +54,13 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     )
     print("✓ Embedding copied")
     
-    # 2. Layers (1:1 mapping from HF to Samba)
-    # Note: HF uses residual block structure (norm + mixer)
-    # mamba-ssm uses flat structure (just the Mamba block)
-    # We need to extract only the mixer parameters
+    # 2. Layers (extract mixer weights from HF residual blocks)
     n_layers = len(samba_model.layers)
+    successful_loads = 0
     
     for layer_idx in range(n_layers):
-        # Find all keys for this layer's mixer in HF model
+        # HF structure: backbone.layers.{i}.mixer.{param}
+        # mamba-ssm structure: {param}
         hf_mixer_prefix = f"backbone.layers.{layer_idx}.mixer."
         
         layer_state_dict = {}
@@ -76,14 +73,23 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
                 local_key = key.replace(hf_mixer_prefix, "")
                 layer_state_dict[local_key] = value
         
-        # Load into layer (strict=False to ignore norm and other residual components)
-        missing, unexpected = samba_model.layers[layer_idx].load_state_dict(layer_state_dict, strict=False)
-        
-        # Only report if there are critical missing keys (not just structural differences)
-        if missing and len(layer_state_dict) == 0:
-            print(f"  ⚠️ Layer {layer_idx}: No weights loaded (key structure mismatch)")
+        if len(layer_state_dict) > 0:
+            # Load into layer (strict=False allows architectural differences)
+            missing, unexpected = samba_model.layers[layer_idx].load_state_dict(
+                layer_state_dict, strict=False
+            )
+            successful_loads += 1
+            
+            if debug and (missing or unexpected):
+                print(f"\n  Layer {layer_idx}:")
+                if missing:
+                    print(f"    Missing: {missing}")
+                if unexpected:
+                    print(f"    Unexpected: {unexpected}")
+        else:
+            print(f"  ⚠️ Layer {layer_idx}: No weights found (prefix '{hf_mixer_prefix}' not in HF model)")
     
-    print(f"✓ All {n_layers} layers loaded")
+    print(f"✓ Loaded {successful_loads}/{n_layers} layers successfully")
     
     # 3. Final norm (RMSNorm has no bias)
     samba_model.norm_f.weight.data.copy_(hf_model.backbone.norm_f.weight.data)

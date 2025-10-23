@@ -29,8 +29,5 @@ setup(
 
         # GPU 필수 패키지
         "torch>=2.5.1",
-        "torchvision",
-        "torchaudio",
-        "triton>=2.0.0",
     ],
 )

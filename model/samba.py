@@ -63,20 +63,29 @@ class Samba(nn.Module):
         if n_layers % readout_stride != 0:
             raise ValueError(f"n_layers ({n_layers}) must be divisible by readout_stride ({readout_stride})")
         
-        # Create n_layers individual Mamba blocks (NOT n_chunks!)
-        # This ensures architecture matches pretrained Mamba exactly
+        # Create n_layers individual Mamba blocks with RMSNorm (matches HF structure!)
+        # HF structure: norm -> mixer -> residual
         if self.use_cuda:
             # Use mamba-ssm CUDA implementation
-            self.layers = nn.ModuleList([
-                MambaCUDA(
-                    d_model=d_model,
-                    d_state=d_state,
-                    d_conv=d_conv,
-                    expand=expand_factor,  # ✓ Use expand_factor (NOT readout_stride!)
-                    dt_rank=dt_rank if isinstance(dt_rank, int) else "auto",
+            from mamba_ssm.ops.triton.layer_norm import RMSNorm
+            
+            self.layers = nn.ModuleList()
+            self.layer_norms = nn.ModuleList()
+            
+            for _ in range(n_layers):
+                # RMSNorm for each layer (like HF)
+                self.layer_norms.append(RMSNorm(d_model))
+                
+                # Mamba layer
+                self.layers.append(
+                    MambaCUDA(
+                        d_model=d_model,
+                        d_state=d_state,
+                        d_conv=d_conv,
+                        expand=expand_factor,  # ✓ Use expand_factor (NOT readout_stride!)
+                        dt_rank=dt_rank if isinstance(dt_rank, int) else "auto",
+                    )
                 )
-                for _ in range(n_layers)  # ✓ Create n_layers (24), NOT n_chunks (6)
-            ])
         else:
             # Fallback to pure PyTorch (for compatibility)
             from .mamba import Mamba
@@ -106,8 +115,11 @@ class Samba(nn.Module):
         sampled_layer_indices = []
         
         for i, layer in enumerate(self.layers):
-            # Pass through Mamba layer
-            x = layer(x)  # Returns (batch, seq_len, d_model)
+            # Residual block structure (matches HF Mamba)
+            residual = x
+            x = self.layer_norms[i](x)  # RMSNorm
+            x = layer(x)                # Mamba layer
+            x = residual + x            # Residual connection
             
             # Sample output every readout_stride layers
             # e.g., if readout_stride=4: sample at layers 3, 7, 11, 15, 19, 23 (0-indexed)

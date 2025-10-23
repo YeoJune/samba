@@ -54,15 +54,18 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     )
     print("✓ Embedding copied")
     
-    # 2. Layers (extract mixer weights from HF residual blocks)
+    # 2. Layers (load both norm and mixer weights)
     n_layers = len(samba_model.layers)
     successful_loads = 0
     
     for layer_idx in range(n_layers):
-        # HF structure: backbone.layers.{i}.mixer.{param}
-        # mamba-ssm structure: {param}
-        hf_mixer_prefix = f"backbone.layers.{layer_idx}.mixer."
+        # Load RMSNorm weights
+        hf_norm_key = f"backbone.layers.{layer_idx}.norm.weight"
+        if hf_norm_key in hf_state_dict:
+            samba_model.layer_norms[layer_idx].weight.data.copy_(hf_state_dict[hf_norm_key])
         
+        # Load Mamba mixer weights
+        hf_mixer_prefix = f"backbone.layers.{layer_idx}.mixer."
         layer_state_dict = {}
         
         for key, value in hf_state_dict.items():
@@ -89,7 +92,7 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
         else:
             print(f"  ⚠️ Layer {layer_idx}: No weights found (prefix '{hf_mixer_prefix}' not in HF model)")
     
-    print(f"✓ Loaded {successful_loads}/{n_layers} layers successfully")
+    print(f"✓ Loaded {successful_loads}/{n_layers} layers (with norms) successfully")
     
     # 3. Final norm (RMSNorm has no bias)
     samba_model.norm_f.weight.data.copy_(hf_model.backbone.norm_f.weight.data)

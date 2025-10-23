@@ -72,9 +72,8 @@ class Samba(nn.Module):
                     d_model=d_model,
                     d_state=d_state,
                     d_conv=d_conv,
-                    expand=expand_factor,
+                    expand=readout_stride,
                     dt_rank=dt_rank if isinstance(dt_rank, int) else "auto",
-                    n_layers=readout_stride  # Each chunk has 'stride' layers
                 )
                 for _ in range(n_chunks)
             ])

@@ -53,7 +53,7 @@ training:
 # Dataset Configuration
 dataset:
   name: "wikitext"
-  config_name: "wikitext-2-raw-v1"
+  config_name: "wikitext-103-raw-v1"
   tokenizer: "gpt2"
   max_length: 512
   stride: 256 # For sliding window

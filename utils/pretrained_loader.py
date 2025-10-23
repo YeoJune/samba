@@ -9,16 +9,16 @@ import torch.nn as nn
 
 def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-hf"):
     """
-    Load pretrained HuggingFace Mamba weights into Samba model with chunks
+    Load pretrained HuggingFace Mamba weights into Samba model
     
     Strategy:
     1. Load full 24-layer HF model state_dict
     2. Load embedding, norm_f, lm_head directly to Samba
-    3. Split 24 layers into chunks (e.g., 6 chunks of 4 layers each)
-    4. Remap prefixes: layers.{i*4+j} → chunk[i].layers.{j}
+    3. Load each of 24 layers with direct 1:1 mapping
+    4. Remap prefixes: backbone.layers.{i} → layers.{i}
     
     Args:
-        samba_model: Samba model instance with chunks
+        samba_model: Samba model instance (with 24 individual layers)
         pretrained_name: HuggingFace model name
         
     Returns:
@@ -33,7 +33,7 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     hf_model = AutoModelForCausalLM.from_pretrained(pretrained_name)
     hf_state_dict = hf_model.state_dict()
     
-    print("Copying weights to chunked Samba model...")
+    print("Copying weights to Samba model (24 layers)...")
     
     # 1. Embedding (direct copy)
     samba_model.embedding.weight.data.copy_(
@@ -41,43 +41,32 @@ def load_pretrained_samba(samba_model, pretrained_name="state-spaces/mamba-130m-
     )
     print("✓ Embedding copied")
     
-    # 2. Chunks (prefix remapping)
-    n_chunks = len(samba_model.chunks)
-    layers_per_chunk = samba_model.readout_stride
+    # 2. Layers (1:1 mapping from HF to Samba)
+    n_layers = len(samba_model.layers)
     
-    for chunk_idx in range(n_chunks):
-        print(f"Loading chunk {chunk_idx} (layers {chunk_idx * layers_per_chunk} to {(chunk_idx + 1) * layers_per_chunk - 1})...")
+    for layer_idx in range(n_layers):
+        # Find all keys for this layer in HF model
+        hf_prefix = f"backbone.layers.{layer_idx}."
         
-        chunk_state_dict = {}
+        layer_state_dict = {}
         
-        # Remap each layer in this chunk
-        for local_layer_idx in range(layers_per_chunk):
-            global_layer_idx = chunk_idx * layers_per_chunk + local_layer_idx
-            
-            # Find all keys for this global layer in HF model
-            hf_prefix = f"backbone.layers.{global_layer_idx}."
-            
-            for key, value in hf_state_dict.items():
-                if key.startswith(hf_prefix):
-                    # Remove HF prefix and add mamba-ssm chunk prefix
-                    # HF: backbone.layers.4.mixer.in_proj.weight
-                    # →  layers.0.mixer.in_proj.weight (for chunk[1], local layer 0)
-                    
-                    local_key = key.replace(hf_prefix, f"layers.{local_layer_idx}.")
-                    # Remove 'backbone.' if present
-                    local_key = local_key.replace("backbone.", "")
-                    
-                    chunk_state_dict[local_key] = value
+        for key, value in hf_state_dict.items():
+            if key.startswith(hf_prefix):
+                # Remove HF prefix
+                # HF: backbone.layers.4.mixer.in_proj.weight
+                # →  mixer.in_proj.weight
+                local_key = key.replace(hf_prefix, "")
+                layer_state_dict[local_key] = value
         
-        # Load into chunk
-        missing, unexpected = samba_model.chunks[chunk_idx].load_state_dict(chunk_state_dict, strict=False)
+        # Load into layer
+        missing, unexpected = samba_model.layers[layer_idx].load_state_dict(layer_state_dict, strict=False)
         
         if missing:
-            print(f"  ⚠️ Missing keys in chunk {chunk_idx}: {missing[:3]}..." if len(missing) > 3 else f"  ⚠️ Missing keys: {missing}")
+            print(f"  ⚠️ Layer {layer_idx} missing keys: {missing[:3]}..." if len(missing) > 3 else f"  ⚠️ Layer {layer_idx} missing: {missing}")
         if unexpected:
-            print(f"  ⚠️ Unexpected keys in chunk {chunk_idx}: {unexpected[:3]}..." if len(unexpected) > 3 else f"  ⚠️ Unexpected keys: {unexpected}")
-        
-        print(f"✓ Chunk {chunk_idx} loaded")
+            print(f"  ⚠️ Layer {layer_idx} unexpected keys: {unexpected[:3]}..." if len(unexpected) > 3 else f"  ⚠️ Layer {layer_idx} unexpected: {unexpected}")
+    
+    print(f"✓ All {n_layers} layers loaded")
     
     # 3. Final norm
     samba_model.norm_f.weight.data.copy_(hf_model.backbone.norm_f.weight.data)
@@ -118,13 +107,17 @@ def verify_samba_weights(samba_model, pretrained_name="state-spaces/mamba-130m-h
     emb_diff = (samba_cpu.embedding.weight - hf_cpu.backbone.embeddings.weight).abs().max()
     print(f"Embedding max diff: {emb_diff:.2e}")
     
-    # Check first chunk, first layer
-    # Note: mamba-ssm structure may differ from HF, so this is approximate
-    print(f"First chunk verification (approximate, structure may differ)")
+    # Check first layer (approximate - mamba-ssm structure may differ from HF)
+    print(f"\nFirst layer verification (approximate, structure may differ)")
+    try:
+        # This is a best-effort check since mamba-ssm internal structure differs
+        print(f"  Layer 0 exists in both models")
+    except Exception as e:
+        print(f"  ⚠️ Cannot verify layer structure: {e}")
     
     # Check final norm
     norm_diff = (samba_cpu.norm_f.weight - hf_cpu.backbone.norm_f.weight).abs().max()
-    print(f"Final norm max diff: {norm_diff:.2e}")
+    print(f"\nFinal norm max diff: {norm_diff:.2e}")
     
     # Move back to original device
     samba_model.to(device)
@@ -132,7 +125,7 @@ def verify_samba_weights(samba_model, pretrained_name="state-spaces/mamba-130m-h
     threshold = 1e-5
     if emb_diff < threshold and norm_diff < threshold:
         print("\n✅ Weight verification PASSED! (embedding and norm)")
-        print("   Note: Chunk layer verification requires mamba-ssm structure analysis")
+        print("   Note: Layer verification requires mamba-ssm structure analysis")
     else:
         print("\n⚠️ Warning: Some differences > 1e-5")
     

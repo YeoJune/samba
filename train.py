@@ -230,9 +230,9 @@ def main():
         
         # Freeze backbone if specified
         if config['pretrained']['freeze_backbone']:
-            print("Freezing Mamba backbone (chunks)...")
-            for chunk in model.chunks:
-                for param in chunk.parameters():
+            print("Freezing Mamba backbone (layers)...")
+            for layer in model.layers:
+                for param in layer.parameters():
                     param.requires_grad = False
             print("✓ Backbone frozen (only readout will be trained)")
     else:

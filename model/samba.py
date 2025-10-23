@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 from .readouts import SambaReadout
 
-from mamba_ssm import Mamba as MambaCUDA
-MAMBA_SSM_AVAILABLE = True
 try:
     from mamba_ssm import Mamba as MambaCUDA
     MAMBA_SSM_AVAILABLE = True
@@ -22,10 +20,12 @@ class Samba(nn.Module):
     """
     Samba: Sparse Mamba (130M parameters)
     
-    Uses mamba-ssm CUDA kernels with layer chunking for:
-    - Speed: CUDA acceleration (100x faster than pure PyTorch)
-    - VRAM: Only stores sampled chunk outputs (not all hidden states)
-    - Sparsity: L1 regularization on layer outputs
+    Architecture: n_layers (24) Mamba blocks with sampled outputs
+    - Identical to pretrained Mamba for weight loading
+    - Samples every readout_stride-th layer output (e.g., 4, 8, 12, 16, 20, 24)
+    - Uses mamba-ssm CUDA kernels for speed (100x faster than pure PyTorch)
+    - VRAM efficient: Only stores sampled outputs (not all hidden states)
+    - Sparsity: L1 regularization on sampled layer outputs
     """
     
     def __init__(
@@ -59,23 +59,23 @@ class Samba(nn.Module):
         # Tie weights
         self.lm_head.weight = self.embedding.weight
         
-        # Mamba chunks (each chunk has readout_stride layers)
+        # Validate readout_stride
         if n_layers % readout_stride != 0:
             raise ValueError(f"n_layers ({n_layers}) must be divisible by readout_stride ({readout_stride})")
         
-        n_chunks = n_layers // readout_stride
-        
+        # Create n_layers individual Mamba blocks (NOT n_chunks!)
+        # This ensures architecture matches pretrained Mamba exactly
         if self.use_cuda:
             # Use mamba-ssm CUDA implementation
-            self.chunks = nn.ModuleList([
+            self.layers = nn.ModuleList([
                 MambaCUDA(
                     d_model=d_model,
                     d_state=d_state,
                     d_conv=d_conv,
-                    expand=readout_stride,
+                    expand=expand_factor,  # ✓ Use expand_factor (NOT readout_stride!)
                     dt_rank=dt_rank if isinstance(dt_rank, int) else "auto",
                 )
-                for _ in range(n_chunks)
+                for _ in range(n_layers)  # ✓ Create n_layers (24), NOT n_chunks (6)
             ])
         else:
             # Fallback to pure PyTorch (for compatibility)
@@ -95,31 +95,32 @@ class Samba(nn.Module):
         Returns: 
             - main_logits: (batch, seq_len, vocab_size)
             - readout_logits: (batch, seq_len, vocab_size)
-            - sampled_layer_outputs: list of chunk outputs (for loss)
-            - sampled_layer_indices: chunk indices
+            - sampled_layer_outputs: list of sampled outputs (for loss)
+            - sampled_layer_indices: sampled layer indices
         """
         # Embedding
         x = self.embedding(input_ids)
         
-        # Process each chunk and collect outputs
+        # Process all layers and sample outputs at readout_stride intervals
         sampled_layer_outputs = []
+        sampled_layer_indices = []
         
-        for i, chunk in enumerate(self.chunks):
-            # Each chunk processes readout_stride layers with CUDA acceleration
-            x = chunk(x)  # Returns (batch, seq_len, d_model)
+        for i, layer in enumerate(self.layers):
+            # Pass through Mamba layer
+            x = layer(x)  # Returns (batch, seq_len, d_model)
             
-            # Store chunk output for readout and pruning loss
-            sampled_layer_outputs.append(x)
+            # Sample output every readout_stride layers
+            # e.g., if readout_stride=4: sample at layers 3, 7, 11, 15, 19, 23 (0-indexed)
+            if (i + 1) % self.readout_stride == 0:
+                sampled_layer_outputs.append(x)
+                sampled_layer_indices.append(i)
         
-        # Main output
+        # Main output (final layer)
         x = self.norm_f(x)
         main_logits = self.lm_head(x)
         
-        # Readout output (uses all chunk outputs)
+        # Readout output (uses sampled outputs only)
         readout_logits = self.readout(sampled_layer_outputs)
-        
-        # Chunk indices (0, 1, 2, ..., n_chunks-1)
-        sampled_layer_indices = list(range(len(self.chunks)))
         
         return main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices
     

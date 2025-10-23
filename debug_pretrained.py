@@ -60,7 +60,13 @@ if not has_nan and not has_inf:
 
 # 6. Test forward pass with dummy input
 print("\n6. Testing forward pass with dummy input...")
-input_ids = torch.randint(0, 50280, (2, 16))
+
+# Move model and input to CUDA
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"   Using device: {device}")
+model = model.to(device)
+
+input_ids = torch.randint(0, 50280, (2, 16)).to(device)
 print(f"   Input shape: {input_ids.shape}")
 
 try:
@@ -95,7 +101,7 @@ except Exception as e:
 
 # 7. Test loss computation
 print("\n7. Testing loss computation...")
-targets = torch.randint(0, 50280, (2, 16))
+targets = torch.randint(0, 50280, (2, 16)).to(device)
 
 try:
     with torch.no_grad():
@@ -133,7 +139,7 @@ print("\n8. Comparing with original HuggingFace model...")
 try:
     from transformers import AutoModelForCausalLM
     
-    hf_model = AutoModelForCausalLM.from_pretrained("state-spaces/mamba-130m-hf")
+    hf_model = AutoModelForCausalLM.from_pretrained("state-spaces/mamba-130m-hf").to(device)
     
     with torch.no_grad():
         hf_outputs = hf_model(input_ids)

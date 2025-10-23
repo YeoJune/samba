@@ -48,8 +48,6 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     total_main_loss = 0
     total_aux_loss = 0
     total_l1_loss = 0
-    total_main_acc = 0
-    total_aux_acc = 0
     
     use_amp = config['training'].get('use_amp', False)
     
@@ -83,12 +81,6 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
                    aux_weight * aux_loss + \
                    l1_weight * l1_loss
         
-        # Calculate accuracies (outside autocast, detached from graph)
-        with torch.no_grad():
-            main_preds = main_logits.argmax(dim=-1)
-            main_acc = (main_preds == targets).float().mean().item()
-        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
-        
         # Backward pass with AMP
         optimizer.zero_grad()
         if use_amp and scaler is not None:
@@ -113,8 +105,6 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         total_main_loss += main_loss.item()
         total_aux_loss += aux_loss.item()
         total_l1_loss += l1_loss.item()
-        total_main_acc += main_acc
-        total_aux_acc += aux_acc
         
         # Update progress bar
         pbar.set_postfix({
@@ -122,8 +112,6 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             'main': f"{main_loss.item():.4f}",
             'aux': f"{aux_loss.item():.4f}",
             'l1': f"{l1_loss.item():.4f}",
-            'main_acc': f"{main_acc:.3f}",
-            'aux_acc': f"{aux_acc:.3f}",
             'sparsity': f"{l1_metrics['avg_near_zero_ratio']:.3f}"
         })
         
@@ -134,8 +122,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
                 'train/main_loss': main_loss.item(),
                 'train/aux_loss': aux_loss.item(),
                 'train/l1_loss': l1_loss.item(),
-                'train/main_accuracy': main_acc,
-                'train/aux_accuracy': aux_acc,
+                'train/aux_accuracy': aux_metrics['aux_accuracy'],
                 'train/sparsity': l1_metrics['avg_near_zero_ratio'],
                 'train/l1_norm': l1_metrics['l1_loss'],
                 'step': epoch * len(dataloader) + batch_idx
@@ -145,10 +132,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     avg_main_loss = total_main_loss / len(dataloader)
     avg_aux_loss = total_aux_loss / len(dataloader)
     avg_l1_loss = total_l1_loss / len(dataloader)
-    avg_main_acc = total_main_acc / len(dataloader)
-    avg_aux_acc = total_aux_acc / len(dataloader)
     
-    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, avg_main_acc, avg_aux_acc
+    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss
 
 
 @torch.no_grad()
@@ -159,8 +144,6 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
     total_main_loss = 0
     total_aux_loss = 0
     total_l1_loss = 0
-    total_main_acc = 0
-    total_aux_acc = 0
     
     use_amp = config['training'].get('use_amp', False)
     
@@ -180,7 +163,7 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
                 main_logits.reshape(-1, vocab_size), 
                 targets.reshape(-1)
             )
-            aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
+            aux_loss, _ = aux_loss_fn(aux_logits, targets)
             l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
             
             aux_weight = config['training']['aux_weight']
@@ -190,29 +173,20 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
                    aux_weight * aux_loss + \
                    l1_weight * l1_loss
         
-        # Calculate accuracies (outside autocast, already in no_grad context)
-        main_preds = main_logits.argmax(dim=-1)
-        main_acc = (main_preds == targets).float().mean().item()
-        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
-        
         total_loss += loss.item()
         total_main_loss += main_loss.item()
         total_aux_loss += aux_loss.item()
         total_l1_loss += l1_loss.item()
-        total_main_acc += main_acc
-        total_aux_acc += aux_acc
     
     avg_loss = total_loss / len(dataloader)
     avg_main_loss = total_main_loss / len(dataloader)
     avg_aux_loss = total_aux_loss / len(dataloader)
     avg_l1_loss = total_l1_loss / len(dataloader)
-    avg_main_acc = total_main_acc / len(dataloader)
-    avg_aux_acc = total_aux_acc / len(dataloader)
     
     # Get sparsity stats from all layer outputs
     sparsity_stats = model.get_sparsity_stats(all_layer_outputs)
     
-    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, avg_main_acc, avg_aux_acc, sparsity_stats
+    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, sparsity_stats
 
 
 def main():
@@ -347,13 +321,13 @@ def main():
         print(f"{'='*80}")
         
         # Train
-        train_loss, train_main, train_aux, train_l1, train_main_acc, train_aux_acc = train_epoch(
+        train_loss, train_main, train_aux, train_l1 = train_epoch(
             model, train_loader, optimizer, main_loss_fn, 
             aux_loss_fn, l1_loss_fn, config, epoch, device, scaler
         )
         
         # Evaluate
-        val_loss, val_main, val_aux, val_l1, val_main_acc, val_aux_acc, sparsity_stats = evaluate(
+        val_loss, val_main, val_aux, val_l1, sparsity_stats = evaluate(
             model, val_loader, main_loss_fn, aux_loss_fn, 
             l1_loss_fn, config, device
         )
@@ -364,10 +338,8 @@ def main():
         # Print results
         print(f"\nTrain Loss: {train_loss:.4f} (Main: {train_main:.4f}, "
               f"Aux: {train_aux:.4f}, L1: {train_l1:.4f})")
-        print(f"Train Acc: Main: {train_main_acc:.4f}, Aux: {train_aux_acc:.4f}")
         print(f"Val Loss: {val_loss:.4f} (Main: {val_main:.4f}, "
               f"Aux: {val_aux:.4f}, L1: {val_l1:.4f})")
-        print(f"Val Acc: Main: {val_main_acc:.4f}, Aux: {val_aux_acc:.4f}")
         print(f"Sparsity: {sparsity_stats['avg_near_zero_ratio']:.4f}, "
               f"L1: {sparsity_stats['avg_l1_norm']:.4f}")
         
@@ -375,15 +347,10 @@ def main():
         if config['logging']['use_wandb']:
             wandb.log({
                 'epoch': epoch,
-                'train/epoch_loss': train_loss,
-                'train/epoch_main_acc': train_main_acc,
-                'train/epoch_aux_acc': train_aux_acc,
                 'val/total_loss': val_loss,
                 'val/main_loss': val_main,
                 'val/aux_loss': val_aux,
                 'val/l1_loss': val_l1,
-                'val/main_accuracy': val_main_acc,
-                'val/aux_accuracy': val_aux_acc,
                 'val/sparsity': sparsity_stats['avg_near_zero_ratio'],
                 'val/l1_norm': sparsity_stats['avg_l1_norm'],
                 'lr': optimizer.param_groups[0]['lr']

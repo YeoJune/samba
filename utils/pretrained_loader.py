@@ -185,20 +185,11 @@ def load_pretrained_decoder(decoder, pretrained_name="gpt2", target_vocab_size=5
     gpt2_model = GPT2LMHeadModel.from_pretrained(pretrained_name)
     gpt2_state_dict = gpt2_model.state_dict()
     
-    # 1. Embedding (resize if vocab sizes differ)
+    # Note: Skip embedding loading since decoder will use parent embedding
+    # 1. Embedding - Skip if using shared embedding
     gpt2_vocab_size = gpt2_model.config.vocab_size
-    
-    if target_vocab_size == gpt2_vocab_size:
-        decoder.embedding.weight.data.copy_(gpt2_model.transformer.wte.weight.data)
-        print(f"  ✓ Embedding copied ({gpt2_vocab_size} tokens)")
-    else:
-        # Copy existing tokens, initialize new tokens randomly
-        min_vocab = min(target_vocab_size, gpt2_vocab_size)
-        decoder.embedding.weight.data[:min_vocab].copy_(
-            gpt2_model.transformer.wte.weight.data[:min_vocab]
-        )
-        print(f"  ✓ Embedding copied ({min_vocab}/{gpt2_vocab_size} tokens, "
-              f"{target_vocab_size - min_vocab} new tokens randomly initialized)")
+    print(f"  ⚠️ Decoder embedding will be shared with Samba backbone")
+    print(f"     (Skipping GPT-2 embedding copy to avoid duplication)")
     
     # 2. Position embedding
     gpt2_max_pos = gpt2_model.config.n_positions

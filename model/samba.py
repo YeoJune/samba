@@ -99,6 +99,12 @@ class Samba(nn.Module):
             dropout=decoder_dropout
         )
         
+        # Share embeddings: Decoder uses same embedding as Samba backbone
+        self.readout.parent_embedding = self.embedding
+        
+        # Share aux_head with lm_head (optional but saves memory)
+        self.readout.aux_head.weight = self.lm_head.weight
+        
     def forward(self, input_ids, targets=None):
         """
         Args:

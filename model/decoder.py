@@ -47,39 +47,32 @@ class WindowedAttn(nn.Module):
         k = k.view(B, S, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, S, self.n_heads, self.d_head).transpose(1, 2)
         
-        # Windowed attention: split sequence into windows
-        if S > self.window_size:
-            # Process in windows
-            outputs = []
-            for i in range(0, S, self.window_size):
-                end = min(i + self.window_size, S)
-                q_win = q[:, :, i:end, :]
-                k_win = k[:, :, i:end, :]
-                v_win = v[:, :, i:end, :]
-                
-                # Attention
-                attn = torch.matmul(q_win, k_win.transpose(-2, -1)) * self.scale
-                
-                # Causal mask
-                win_size = end - i
-                mask = self.causal_mask[:, :, :win_size, :win_size]
-                attn = attn.masked_fill(mask == 0, float('-inf'))
-                
-                attn = torch.softmax(attn, dim=-1)
-                attn = self.dropout(attn)
-                
-                out_win = torch.matmul(attn, v_win)
-                outputs.append(out_win)
-            
-            out = torch.cat(outputs, dim=2)  # (B, H, S, D_h)
-        else:
-            # Single window
-            attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # Attention scores
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, S, S)
+        
+        # Create causal + windowed mask
+        # Each token can only attend to previous tokens within window_size
+        if S <= self.window_size:
+            # Use pre-registered mask for small sequences
             mask = self.causal_mask[:, :, :S, :S]
-            attn = attn.masked_fill(mask == 0, float('-inf'))
-            attn = torch.softmax(attn, dim=-1)
-            attn = self.dropout(attn)
-            out = torch.matmul(attn, v)
+        else:
+            # Create windowed causal mask on-the-fly
+            mask = torch.tril(torch.ones(S, S, device=x.device, dtype=x.dtype))
+            
+            # Apply window constraint: each position can only see last window_size tokens
+            for i in range(S):
+                if i >= self.window_size:
+                    mask[i, :i - self.window_size] = 0
+            
+            mask = mask.view(1, 1, S, S)
+        
+        # Apply mask
+        attn = attn.masked_fill(mask == 0, float('-inf'))
+        attn = torch.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        
+        # Apply attention to values
+        out = torch.matmul(attn, v)  # (B, H, S, D_h)
         
         # Reshape back
         out = out.transpose(1, 2).contiguous().view(B, S, D)
@@ -161,17 +154,23 @@ class Decoder(nn.Module):
         # Final norm (GPT-2 style)
         self.norm_f = nn.LayerNorm(d_model)
     
-    def forward(self, input_ids, memory):
+    def forward(self, input_ids, memory, embedding_layer=None):
         """
         input_ids: (batch, seq_len) - shifted targets
         memory: (batch, seq_len, d_model) - Mamba hidden states
+        embedding_layer: Optional external embedding layer (for weight sharing)
         Returns: (batch, seq_len, d_model)
         """
         B, S = input_ids.shape
         
-        # Embeddings
+        # Embeddings (use external if provided, else use own)
+        if embedding_layer is not None:
+            token_emb = embedding_layer(input_ids)
+        else:
+            token_emb = self.embedding(input_ids)
+        
         positions = torch.arange(S, device=input_ids.device).unsqueeze(0)  # (1, S)
-        x = self.embedding(input_ids) + self.pos_embedding(positions)
+        x = token_emb + self.pos_embedding(positions)
         x = self.dropout(x)
         
         # Decoder layers

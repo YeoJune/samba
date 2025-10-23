@@ -37,6 +37,9 @@ class Readout(nn.Module):
         
         # 3. Auxiliary prediction head
         self.aux_head = nn.Linear(d_model, vocab_size, bias=False)
+        
+        # Store reference to parent embedding (will be set by Samba)
+        self.parent_embedding = None
     
     def forward(self, all_layer_outputs, targets):
         """
@@ -60,7 +63,8 @@ class Readout(nn.Module):
         decoder_input = self.decoder.shift_right(targets)
         
         # Step 3: Decoder (windowed self-attn + cross-attn to memory)
-        decoder_output = self.decoder(decoder_input, memory)
+        # Use parent embedding for weight sharing
+        decoder_output = self.decoder(decoder_input, memory, embedding_layer=self.parent_embedding)
         
         # Step 4: Auxiliary prediction
         aux_logits = self.aux_head(decoder_output)

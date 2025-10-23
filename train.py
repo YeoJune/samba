@@ -182,17 +182,17 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
             aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
             l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
             
-            # Calculate accuracies
-            main_preds = main_logits.argmax(dim=-1)
-            main_acc = (main_preds == targets).float().mean()
-            aux_acc = aux_metrics['aux_accuracy']
-            
             aux_weight = config['training']['aux_weight']
             l1_weight = config['training']['l1_weight']
             
             loss = main_loss + \
                    aux_weight * aux_loss + \
                    l1_weight * l1_loss
+        
+        # Calculate accuracies (outside autocast to save memory)
+        main_preds = main_logits.argmax(dim=-1)
+        main_acc = (main_preds == targets).float().mean()
+        aux_acc = aux_metrics['aux_accuracy']
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()

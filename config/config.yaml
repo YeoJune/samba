@@ -12,9 +12,9 @@ model:
   dt_rank: 48 # Delta rank (ceil(d_model / 16))
 
   # Decoder configuration (GPT-2 based)
-  decoder_n_layers: 1 # Number of decoder layers
+  decoder_n_layers: 6 # Number of decoder layers
   decoder_n_heads: 12 # Number of attention heads
-  decoder_window_size: 4 # Windowed self-attention window size
+  decoder_window_size: 32 # Windowed self-attention window size
   decoder_dropout: 0.1 # Dropout rate
 
 # Pretrained Model

@@ -1,7 +1,8 @@
-# Samba Configuration
+# Samba Configuration (3-Loss Hybrid Architecture)
 
-# Model Configuration (130M - compatible with HuggingFace)
+# Model Configuration (130M backbone + decoder)
 model:
+  # Mamba Backbone (compatible with HuggingFace mamba-130m-hf)
   vocab_size: 50280 # GPT-2 tokenizer
   d_model: 768 # Hidden dimension
   n_layers: 24 # Number of Mamba blocks
@@ -10,19 +11,27 @@ model:
   expand_factor: 2 # Expansion factor (d_inner = d_model * expand)
   dt_rank: 48 # Delta rank (ceil(d_model / 16))
 
-  # Readout configuration
-  readout_hidden_dim: 512 # Hidden dimension for readout MLP
-  readout_stride: 4 # Sample every 4th layer (reduces VRAM by 75%)
+  # Decoder configuration (GPT-2 based)
+  decoder_n_layers: 6 # Number of decoder layers
+  decoder_n_heads: 12 # Number of attention heads
+  decoder_window_size: 32 # Windowed self-attention window size
+  decoder_dropout: 0.1 # Dropout rate
 
 # Pretrained Model
 pretrained:
   use_pretrained: true
-  model_name: "state-spaces/mamba-130m-hf"
+
+  # Mamba backbone weights
+  mamba_model: "state-spaces/mamba-130m-hf"
+
+  # Decoder weights (GPT-2 small)
+  decoder_model: "gpt2" # Will be adapted for vocab_size=50280
+
   freeze_backbone: false # Whether to freeze Mamba layers
 
 # Training Configuration
 training:
-  batch_size: 2
+  batch_size: 2 # Adjust based on VRAM (reduce if OOM)
   seq_len: 512
   epochs: 10
   lr: 0.00005
@@ -30,9 +39,13 @@ training:
   warmup_ratio: 0.1
   gradient_clip: 1.0
 
-  # Loss weights
-  readout_weight: 0.5 # α - weight for readout loss
-  pruning_weight: 0.05 # λ - weight for pruning loss (L1)
+  # 3-Loss weights
+  aux_weight: 0.5 # λ_aux - Auxiliary decoder loss weight
+  l1_weight: 0.05 # λ_l1 - L1 sparsity loss weight
+
+  # VRAM optimization
+  use_gradient_checkpointing: false # Enable if OOM
+  use_amp: true # Mixed precision (FP16)
 
   # Sparsity target (for adaptive pruning)
   target_sparsity: 0.5 # Target 50% sparsity

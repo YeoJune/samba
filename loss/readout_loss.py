@@ -1,6 +1,7 @@
 """
-Readout Loss
-Auxiliary loss to ensure the dense readout vector predicts the correct output
+Auxiliary Loss
+Cross-entropy loss on auxiliary decoder predictions
+Ensures the dense memory vector contains meaningful semantic information
 """
 
 import torch
@@ -8,9 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ReadoutLoss(nn.Module):
+class AuxLoss(nn.Module):
     """
-    Cross-entropy loss on readout logits
+    Cross-entropy loss on auxiliary logits from decoder
     
     This ensures the dense vector aggregated from sparse hidden states
     contains meaningful semantic information.
@@ -20,48 +21,53 @@ class ReadoutLoss(nn.Module):
         super().__init__()
         self.ce_loss = nn.CrossEntropyLoss()
     
-    def forward(self, readout_logits, targets):
+    def forward(self, aux_logits, targets):
         """
         Args:
-            readout_logits: (batch, seq_len, vocab_size)
+            aux_logits: (batch, seq_len, vocab_size)
             targets: (batch, seq_len)
             
         Returns:
             loss: scalar
         """
-        batch, seq_len, vocab_size = readout_logits.shape
+        batch, seq_len, vocab_size = aux_logits.shape
         
         # Reshape for cross entropy
-        readout_logits_flat = readout_logits.reshape(-1, vocab_size)
+        aux_logits_flat = aux_logits.reshape(-1, vocab_size)
         targets_flat = targets.reshape(-1)
         
-        loss = self.ce_loss(readout_logits_flat, targets_flat)
+        loss = self.ce_loss(aux_logits_flat, targets_flat)
         
         return loss
 
 
-class ReadoutLossWithMetrics(ReadoutLoss):
-    """Readout loss with additional metrics"""
+class AuxLossWithMetrics(AuxLoss):
+    """Auxiliary loss with additional metrics"""
     
-    def forward(self, readout_logits, targets):
+    def forward(self, aux_logits, targets):
         """
         Returns:
             loss: scalar
             metrics: dict with accuracy and perplexity
         """
-        loss = super().forward(readout_logits, targets)
+        loss = super().forward(aux_logits, targets)
         
         # Calculate accuracy
-        batch, seq_len, vocab_size = readout_logits.shape
-        predictions = readout_logits.argmax(dim=-1)
+        batch, seq_len, vocab_size = aux_logits.shape
+        predictions = aux_logits.argmax(dim=-1)
         accuracy = (predictions == targets).float().mean()
         
         # Calculate perplexity
         perplexity = torch.exp(loss)
         
         metrics = {
-            'readout_accuracy': accuracy.item(),
-            'readout_perplexity': perplexity.item()
+            'aux_accuracy': accuracy.item(),
+            'aux_perplexity': perplexity.item()
         }
         
         return loss, metrics
+
+
+# Keep old names for backward compatibility
+ReadoutLoss = AuxLoss
+ReadoutLossWithMetrics = AuxLossWithMetrics

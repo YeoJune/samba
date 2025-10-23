@@ -1,15 +1,19 @@
 """
-Samba: Sparse Mamba (130M parameters)
-Mamba with readout for sparse representation learning
-Uses mamba-ssm CUDA kernels for speed
+Samba: 3-Loss Hybrid Architecture
+Mamba backbone + LSM mixing + Windowed decoder
+- Stores all 24 layer outputs (not sampled)
+- L1 loss on all outputs for sparsity
+- Auxiliary decoder loss for semantic meaning
 """
 
 import torch
 import torch.nn as nn
-from .readouts import SambaReadout
+from .readouts import Readout
 
 try:
     from mamba_ssm import Mamba as MambaCUDA
+    # Use mamba-ssm CUDA implementation
+    from mamba_ssm.ops.triton.layer_norm import RMSNorm
     MAMBA_SSM_AVAILABLE = True
 except ImportError:
     MAMBA_SSM_AVAILABLE = False
@@ -18,14 +22,13 @@ except ImportError:
 
 class Samba(nn.Module):
     """
-    Samba: Sparse Mamba (130M parameters)
+    Samba: 3-Loss Hybrid Architecture (130M backbone + decoder)
     
-    Architecture: n_layers (24) Mamba blocks with sampled outputs
-    - Identical to pretrained Mamba for weight loading
-    - Samples every readout_stride-th layer output (e.g., 4, 8, 12, 16, 20, 24)
-    - Uses mamba-ssm CUDA kernels for speed (100x faster than pure PyTorch)
-    - VRAM efficient: Only stores sampled outputs (not all hidden states)
-    - Sparsity: L1 regularization on sampled layer outputs
+    Architecture: 24 Mamba blocks + LSM mixing + Windowed decoder
+    - Stores ALL 24 layer outputs (not sampled)
+    - L1 loss on all outputs for sparsity
+    - Auxiliary decoder loss for semantic meaning
+    - Uses mamba-ssm CUDA kernels for speed
     """
     
     def __init__(
@@ -37,8 +40,10 @@ class Samba(nn.Module):
         d_conv=4,
         expand_factor=2,
         dt_rank="auto",
-        readout_hidden_dim=512,
-        readout_stride=4,  # Sample every N layers (creates n_layers/stride chunks)
+        decoder_n_layers=6,
+        decoder_n_heads=12,
+        decoder_window_size=32,
+        decoder_dropout=0.1,
         use_cuda=True
     ):
         super().__init__()
@@ -48,7 +53,6 @@ class Samba(nn.Module):
         
         self.n_layers = n_layers
         self.d_model = d_model
-        self.readout_stride = readout_stride
         self.use_cuda = use_cuda and MAMBA_SSM_AVAILABLE
         
         # Embedding & Output (owned by Samba)
@@ -59,16 +63,9 @@ class Samba(nn.Module):
         # Tie weights
         self.lm_head.weight = self.embedding.weight
         
-        # Validate readout_stride
-        if n_layers % readout_stride != 0:
-            raise ValueError(f"n_layers ({n_layers}) must be divisible by readout_stride ({readout_stride})")
-        
         # Create n_layers individual Mamba blocks with RMSNorm (matches HF structure!)
         # HF structure: norm -> mixer -> residual
         if self.use_cuda:
-            # Use mamba-ssm CUDA implementation
-            from mamba_ssm.ops.triton.layer_norm import RMSNorm
-            
             self.layers = nn.ModuleList()
             self.layer_norms = nn.ModuleList()
             
@@ -91,28 +88,32 @@ class Samba(nn.Module):
             from .mamba import Mamba
             raise NotImplementedError("Pure PyTorch fallback not yet implemented for chunked architecture")
         
-        # Readout
-        self.readout = SambaReadout(
-            d_model=d_model,
+        # Readout (LSM mixing + Windowed decoder)
+        self.readout = Readout(
             vocab_size=vocab_size,
-            hidden_dim=readout_hidden_dim
+            d_model=d_model,
+            n_layers=n_layers,
+            decoder_n_layers=decoder_n_layers,
+            decoder_n_heads=decoder_n_heads,
+            decoder_window_size=decoder_window_size,
+            dropout=decoder_dropout
         )
         
-    def forward(self, input_ids):
+    def forward(self, input_ids, targets=None):
         """
-        input_ids: (batch, seq_len)
+        Args:
+            input_ids: (batch, seq_len)
+            targets: (batch, seq_len) - required for auxiliary loss
         Returns: 
             - main_logits: (batch, seq_len, vocab_size)
-            - readout_logits: (batch, seq_len, vocab_size)
-            - sampled_layer_outputs: list of sampled outputs (for loss)
-            - sampled_layer_indices: sampled layer indices
+            - aux_logits: (batch, seq_len, vocab_size) or None
+            - all_layer_outputs: list of all 24 layer outputs
         """
         # Embedding
         x = self.embedding(input_ids)
         
-        # Process all layers and sample outputs at readout_stride intervals
-        sampled_layer_outputs = []
-        sampled_layer_indices = []
+        # Process all layers and store ALL outputs
+        all_layer_outputs = []
         
         for i, layer in enumerate(self.layers):
             # Residual block structure (matches HF Mamba)
@@ -121,28 +122,28 @@ class Samba(nn.Module):
             x = layer(x)                # Mamba layer
             x = residual + x            # Residual connection
             
-            # Sample output every readout_stride layers
-            # e.g., if readout_stride=4: sample at layers 3, 7, 11, 15, 19, 23 (0-indexed)
-            if (i + 1) % self.readout_stride == 0:
-                sampled_layer_outputs.append(x)
-                sampled_layer_indices.append(i)
+            # Store ALL layer outputs (not sampled)
+            all_layer_outputs.append(x)
         
         # Main output (final layer)
         x = self.norm_f(x)
         main_logits = self.lm_head(x)
         
-        # Readout output (uses sampled outputs only)
-        readout_logits = self.readout(sampled_layer_outputs)
+        # Auxiliary output (uses all 24 layer outputs)
+        if targets is not None:
+            aux_logits = self.readout(all_layer_outputs, targets)
+        else:
+            aux_logits = None
         
-        return main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices
+        return main_logits, aux_logits, all_layer_outputs
     
-    def get_sparsity_stats(self, sampled_layer_outputs, threshold=1e-3):
+    def get_sparsity_stats(self, all_layer_outputs, threshold=1e-3):
         """
-        Calculate sparsity statistics from sampled layer outputs
+        Calculate sparsity statistics from all layer outputs
         
         Args:
-            sampled_layer_outputs: list of sampled layer outputs
-                                   [(batch, seq_len, d_model), ...]
+            all_layer_outputs: list of all layer outputs
+                               [(batch, seq_len, d_model), ...] (24 items)
             threshold: values below this are considered zero
             
         Returns:
@@ -151,15 +152,15 @@ class Samba(nn.Module):
         total_near_zero = 0.0
         total_l0 = 0.0
         total_l1 = 0.0
-        num_sampled = len(sampled_layer_outputs)
+        num_layers = len(all_layer_outputs)
         
-        for layer_output in sampled_layer_outputs:
+        for layer_output in all_layer_outputs:
             total_near_zero += (layer_output.abs() < threshold).float().mean()
             total_l0 += (layer_output == 0).float().mean()
             total_l1 += layer_output.abs().mean()
         
         return {
-            'avg_near_zero_ratio': (total_near_zero / num_sampled).item(),
-            'avg_l0_sparsity': (total_l0 / num_sampled).item(),
-            'avg_l1_norm': (total_l1 / num_sampled).item()
+            'avg_near_zero_ratio': (total_near_zero / num_layers).item(),
+            'avg_l0_sparsity': (total_l0 / num_layers).item(),
+            'avg_l1_norm': (total_l1 / num_layers).item()
         }

@@ -1,35 +1,35 @@
 """
-Pruning Loss
-L1 regularization on hidden states to induce sparsity
+L1 Loss (Pruning Loss)
+L1 regularization on ALL layer outputs to induce sparsity
 """
 
 import torch
 import torch.nn as nn
 
 
-class PruningLoss(nn.Module):
+class L1Loss(nn.Module):
     """
-    L1 regularization on layer outputs
+    L1 regularization on all layer outputs
     
-    Encourages the model to use sparse representations in layer outputs,
+    Encourages the model to use sparse representations in all layer outputs,
     mimicking the sparse coding observed in biological neural systems.
     """
     
     def __init__(self):
         super().__init__()
     
-    def forward(self, sampled_layer_outputs):
+    def forward(self, all_layer_outputs):
         """
         Args:
-            sampled_layer_outputs: list of (batch, seq_len, d_model) tensors
+            all_layer_outputs: list of (batch, seq_len, d_model) tensors (24 items)
             
         Returns:
             loss: scalar L1 norm
         """
         total_l1 = 0.0
-        num_layers = len(sampled_layer_outputs)
+        num_layers = len(all_layer_outputs)
         
-        for layer_output in sampled_layer_outputs:
+        for layer_output in all_layer_outputs:
             # L1 norm: sum of absolute values
             l1 = torch.abs(layer_output).mean()
             total_l1 += l1
@@ -40,15 +40,14 @@ class PruningLoss(nn.Module):
         return avg_l1
 
 
-class PruningLossWithMetrics(PruningLoss):
-    """Pruning loss with sparsity metrics - only on sampled layers"""
+class L1LossWithMetrics(L1Loss):
+    """L1 loss with sparsity metrics - on all 24 layers"""
     
-    def forward(self, sampled_layer_outputs, sampled_layer_indices=None, threshold=1e-3):
+    def forward(self, all_layer_outputs, threshold=1e-3):
         """
         Args:
-            sampled_layer_outputs: list of layer outputs from sampled layers only
-                                   [(batch, seq_len, d_model), ...]
-            sampled_layer_indices: layer indices (unused, for API compatibility)
+            all_layer_outputs: list of layer outputs from all layers
+                               [(batch, seq_len, d_model), ...] (24 items)
         Returns:
             loss: scalar L1 norm
             metrics: dict with sparsity statistics
@@ -56,9 +55,9 @@ class PruningLossWithMetrics(PruningLoss):
         total_l1 = 0.0
         total_near_zero = 0.0
         total_l0 = 0.0
-        num_layers = len(sampled_layer_outputs)
+        num_layers = len(all_layer_outputs)
         
-        for layer_output in sampled_layer_outputs:
+        for layer_output in all_layer_outputs:
             # L1 loss
             l1 = torch.abs(layer_output).mean()
             total_l1 += l1
@@ -80,6 +79,11 @@ class PruningLossWithMetrics(PruningLoss):
         }
         
         return loss, metrics
+
+
+# Keep old names for backward compatibility
+PruningLoss = L1Loss
+PruningLossWithMetrics = L1LossWithMetrics
 
 
 class AdaptivePruningLoss(nn.Module):

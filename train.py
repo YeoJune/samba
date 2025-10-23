@@ -14,10 +14,14 @@ import os
 import yaml
 
 from model.samba import Samba
-from loss.readout_loss import ReadoutLossWithMetrics
-from loss.pruning_loss import PruningLossWithMetrics
+from loss.readout_loss import AuxLossWithMetrics
+from loss.pruning_loss import L1LossWithMetrics
 from utils.data import get_wikitext_dataloaders
-from utils.pretrained_loader import load_pretrained_samba, verify_samba_weights
+from utils.pretrained_loader import (
+    load_pretrained_samba, 
+    verify_samba_weights, 
+    load_pretrained_decoder
+)
 
 
 def load_config(config_path):
@@ -36,14 +40,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn, 
-                pruning_loss_fn, config, epoch, device):
+def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn, 
+                l1_loss_fn, config, epoch, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0
     total_main_loss = 0
-    total_readout_loss = 0
-    total_pruning_loss = 0
+    total_aux_loss = 0
+    total_l1_loss = 0
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
@@ -51,8 +55,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (returns sampled layer outputs only)
-        main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
+        # Forward pass (now requires targets for auxiliary decoder)
+        main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
         
         vocab_size = main_logits.size(-1)
         
@@ -62,16 +66,16 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
             targets.reshape(-1)
         )
         
-        readout_loss, readout_metrics = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_layer_outputs, sampled_layer_indices)
+        aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
+        l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
         
-        # Combined loss
-        readout_weight = config['training']['readout_weight']
-        pruning_weight = config['training']['pruning_weight']
+        # Combined loss (3-Loss system)
+        aux_weight = config['training']['aux_weight']
+        l1_weight = config['training']['l1_weight']
         
         loss = main_loss + \
-               readout_weight * readout_loss + \
-               pruning_weight * pruning_loss
+               aux_weight * aux_loss + \
+               l1_weight * l1_loss
         
         # Backward pass
         optimizer.zero_grad()
@@ -85,16 +89,16 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
         # Accumulate losses
         total_loss += loss.item()
         total_main_loss += main_loss.item()
-        total_readout_loss += readout_loss.item()
-        total_pruning_loss += pruning_loss.item()
+        total_aux_loss += aux_loss.item()
+        total_l1_loss += l1_loss.item()
         
         # Update progress bar
         pbar.set_postfix({
             'loss': f"{loss.item():.4f}",
             'main': f"{main_loss.item():.4f}",
-            'readout': f"{readout_loss.item():.4f}",
-            'pruning': f"{pruning_loss.item():.4f}",
-            'sparsity': f"{pruning_metrics['avg_near_zero_ratio']:.3f}"
+            'aux': f"{aux_loss.item():.4f}",
+            'l1': f"{l1_loss.item():.4f}",
+            'sparsity': f"{l1_metrics['avg_near_zero_ratio']:.3f}"
         })
         
         # Log to wandb
@@ -102,37 +106,37 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, readout_loss_fn,
             wandb.log({
                 'train/total_loss': loss.item(),
                 'train/main_loss': main_loss.item(),
-                'train/readout_loss': readout_loss.item(),
-                'train/pruning_loss': pruning_loss.item(),
-                'train/readout_accuracy': readout_metrics['readout_accuracy'],
-                'train/sparsity': pruning_metrics['avg_near_zero_ratio'],
-                'train/l1_norm': pruning_metrics['l1_loss'],
+                'train/aux_loss': aux_loss.item(),
+                'train/l1_loss': l1_loss.item(),
+                'train/aux_accuracy': aux_metrics['aux_accuracy'],
+                'train/sparsity': l1_metrics['avg_near_zero_ratio'],
+                'train/l1_norm': l1_metrics['l1_loss'],
                 'step': epoch * len(dataloader) + batch_idx
             })
     
     avg_loss = total_loss / len(dataloader)
     avg_main_loss = total_main_loss / len(dataloader)
-    avg_readout_loss = total_readout_loss / len(dataloader)
-    avg_pruning_loss = total_pruning_loss / len(dataloader)
+    avg_aux_loss = total_aux_loss / len(dataloader)
+    avg_l1_loss = total_l1_loss / len(dataloader)
     
-    return avg_loss, avg_main_loss, avg_readout_loss, avg_pruning_loss
+    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, config, device):
+def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, device):
     """Evaluate the model"""
     model.eval()
     total_loss = 0
     total_main_loss = 0
-    total_readout_loss = 0
-    total_pruning_loss = 0
+    total_aux_loss = 0
+    total_l1_loss = 0
     
     for input_ids, targets in tqdm(dataloader, desc='Evaluating'):
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (returns sampled layer outputs only)
-        main_logits, readout_logits, sampled_layer_outputs, sampled_layer_indices = model(input_ids)
+        # Forward pass (requires targets for auxiliary decoder)
+        main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
         
         vocab_size = main_logits.size(-1)
         
@@ -141,30 +145,30 @@ def evaluate(model, dataloader, main_loss_fn, readout_loss_fn, pruning_loss_fn, 
             main_logits.reshape(-1, vocab_size), 
             targets.reshape(-1)
         )
-        readout_loss, _ = readout_loss_fn(readout_logits, targets)
-        pruning_loss, pruning_metrics = pruning_loss_fn(sampled_layer_outputs, sampled_layer_indices)
+        aux_loss, _ = aux_loss_fn(aux_logits, targets)
+        l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
         
-        readout_weight = config['training']['readout_weight']
-        pruning_weight = config['training']['pruning_weight']
+        aux_weight = config['training']['aux_weight']
+        l1_weight = config['training']['l1_weight']
         
         loss = main_loss + \
-               readout_weight * readout_loss + \
-               pruning_weight * pruning_loss
+               aux_weight * aux_loss + \
+               l1_weight * l1_loss
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()
-        total_readout_loss += readout_loss.item()
-        total_pruning_loss += pruning_loss.item()
+        total_aux_loss += aux_loss.item()
+        total_l1_loss += l1_loss.item()
     
     avg_loss = total_loss / len(dataloader)
     avg_main_loss = total_main_loss / len(dataloader)
-    avg_readout_loss = total_readout_loss / len(dataloader)
-    avg_pruning_loss = total_pruning_loss / len(dataloader)
+    avg_aux_loss = total_aux_loss / len(dataloader)
+    avg_l1_loss = total_l1_loss / len(dataloader)
     
-    # Get sparsity stats from sampled layer outputs
-    sparsity_stats = model.get_sparsity_stats(sampled_layer_outputs)
+    # Get sparsity stats from all layer outputs
+    sparsity_stats = model.get_sparsity_stats(all_layer_outputs)
     
-    return avg_loss, avg_main_loss, avg_readout_loss, avg_pruning_loss, sparsity_stats
+    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, sparsity_stats
 
 
 def main():
@@ -205,8 +209,10 @@ def main():
         d_conv=model_config['d_conv'],
         expand_factor=model_config['expand_factor'],
         dt_rank=model_config.get('dt_rank', 'auto'),
-        readout_hidden_dim=model_config['readout_hidden_dim'],
-        readout_stride=model_config.get('readout_stride', 4)
+        decoder_n_layers=model_config.get('decoder_n_layers', 6),
+        decoder_n_heads=model_config.get('decoder_n_heads', 12),
+        decoder_window_size=model_config.get('decoder_window_size', 32),
+        decoder_dropout=model_config.get('decoder_dropout', 0.1)
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
@@ -217,21 +223,30 @@ def main():
         print("Loading pretrained weights...")
         print("="*80)
         
+        # Load Mamba backbone weights
         model = load_pretrained_samba(
             model,
-            config['pretrained']['model_name'],
+            config['pretrained']['mamba_model'],
             debug=True  # Show key mapping details
         )
         
-        # Verify weights
+        # Verify Mamba weights
         verify_samba_weights(
             model,
-            config['pretrained']['model_name']
+            config['pretrained']['mamba_model']
+        )
+        
+        # Load GPT-2 decoder weights
+        model.readout.decoder = load_pretrained_decoder(
+            model.readout.decoder,
+            pretrained_name=config['pretrained']['decoder_model'],
+            target_vocab_size=config['model']['vocab_size'],
+            debug=True
         )
         
         # Freeze backbone if specified
         if config['pretrained']['freeze_backbone']:
-            print("Freezing Mamba backbone (layers)...")
+            print("\nFreezing Mamba backbone (layers)...")
             for layer in model.layers:
                 for param in layer.parameters():
                     param.requires_grad = False
@@ -241,8 +256,8 @@ def main():
     
     # Initialize losses
     main_loss_fn = nn.CrossEntropyLoss()
-    readout_loss_fn = ReadoutLossWithMetrics()
-    pruning_loss_fn = PruningLossWithMetrics()
+    aux_loss_fn = AuxLossWithMetrics()
+    l1_loss_fn = L1LossWithMetrics()
     
     # Initialize optimizer and scheduler
     optimizer = AdamW(
@@ -281,15 +296,15 @@ def main():
         print(f"{'='*80}")
         
         # Train
-        train_loss, train_main, train_readout, train_pruning = train_epoch(
+        train_loss, train_main, train_aux, train_l1 = train_epoch(
             model, train_loader, optimizer, main_loss_fn, 
-            readout_loss_fn, pruning_loss_fn, config, epoch, device
+            aux_loss_fn, l1_loss_fn, config, epoch, device
         )
         
         # Evaluate
-        val_loss, val_main, val_readout, val_pruning, sparsity_stats = evaluate(
-            model, val_loader, main_loss_fn, readout_loss_fn, 
-            pruning_loss_fn, config, device
+        val_loss, val_main, val_aux, val_l1, sparsity_stats = evaluate(
+            model, val_loader, main_loss_fn, aux_loss_fn, 
+            l1_loss_fn, config, device
         )
         
         # Update scheduler
@@ -297,9 +312,9 @@ def main():
         
         # Print results
         print(f"\nTrain Loss: {train_loss:.4f} (Main: {train_main:.4f}, "
-              f"Readout: {train_readout:.4f}, Pruning: {train_pruning:.4f})")
+              f"Aux: {train_aux:.4f}, L1: {train_l1:.4f})")
         print(f"Val Loss: {val_loss:.4f} (Main: {val_main:.4f}, "
-              f"Readout: {val_readout:.4f}, Pruning: {val_pruning:.4f})")
+              f"Aux: {val_aux:.4f}, L1: {val_l1:.4f})")
         print(f"Sparsity: {sparsity_stats['avg_near_zero_ratio']:.4f}, "
               f"L1: {sparsity_stats['avg_l1_norm']:.4f}")
         
@@ -309,8 +324,8 @@ def main():
                 'epoch': epoch,
                 'val/total_loss': val_loss,
                 'val/main_loss': val_main,
-                'val/readout_loss': val_readout,
-                'val/pruning_loss': val_pruning,
+                'val/aux_loss': val_aux,
+                'val/l1_loss': val_l1,
                 'val/sparsity': sparsity_stats['avg_near_zero_ratio'],
                 'val/l1_norm': sparsity_stats['avg_l1_norm'],
                 'lr': optimizer.param_groups[0]['lr']

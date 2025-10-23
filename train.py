@@ -41,7 +41,7 @@ def parse_args():
 
 
 def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn, 
-                l1_loss_fn, config, epoch, device):
+                l1_loss_fn, config, epoch, device, scaler=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -49,42 +49,56 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     total_aux_loss = 0
     total_l1_loss = 0
     
+    use_amp = config['training'].get('use_amp', False)
+    
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
     for batch_idx, (input_ids, targets) in enumerate(pbar):
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (now requires targets for auxiliary decoder)
-        main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
+        # Forward pass with AMP
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            # Forward pass (now requires targets for auxiliary decoder)
+            main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
+            
+            vocab_size = main_logits.size(-1)
+            
+            # Calculate losses
+            main_loss = main_loss_fn(
+                main_logits.reshape(-1, vocab_size), 
+                targets.reshape(-1)
+            )
+            
+            aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
+            l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
+            
+            # Combined loss (3-Loss system)
+            aux_weight = config['training']['aux_weight']
+            l1_weight = config['training']['l1_weight']
+            
+            loss = main_loss + \
+                   aux_weight * aux_loss + \
+                   l1_weight * l1_loss
         
-        vocab_size = main_logits.size(-1)
-        
-        # Calculate losses
-        main_loss = main_loss_fn(
-            main_logits.reshape(-1, vocab_size), 
-            targets.reshape(-1)
-        )
-        
-        aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
-        l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
-        
-        # Combined loss (3-Loss system)
-        aux_weight = config['training']['aux_weight']
-        l1_weight = config['training']['l1_weight']
-        
-        loss = main_loss + \
-               aux_weight * aux_loss + \
-               l1_weight * l1_loss
-        
-        # Backward pass
+        # Backward pass with AMP
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), 
-            config['training']['gradient_clip']
-        )
-        optimizer.step()
+        if use_amp and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 
+                config['training']['gradient_clip']
+            )
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 
+                config['training']['gradient_clip']
+            )
+            optimizer.step()
         
         # Accumulate losses
         total_loss += loss.item()
@@ -131,29 +145,33 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
     total_aux_loss = 0
     total_l1_loss = 0
     
+    use_amp = config['training'].get('use_amp', False)
+    
     for input_ids, targets in tqdm(dataloader, desc='Evaluating'):
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass (requires targets for auxiliary decoder)
-        main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
-        
-        vocab_size = main_logits.size(-1)
-        
-        # Calculate losses
-        main_loss = main_loss_fn(
-            main_logits.reshape(-1, vocab_size), 
-            targets.reshape(-1)
-        )
-        aux_loss, _ = aux_loss_fn(aux_logits, targets)
-        l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
-        
-        aux_weight = config['training']['aux_weight']
-        l1_weight = config['training']['l1_weight']
-        
-        loss = main_loss + \
-               aux_weight * aux_loss + \
-               l1_weight * l1_loss
+        # Forward pass with AMP
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            # Forward pass (requires targets for auxiliary decoder)
+            main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
+            
+            vocab_size = main_logits.size(-1)
+            
+            # Calculate losses
+            main_loss = main_loss_fn(
+                main_logits.reshape(-1, vocab_size), 
+                targets.reshape(-1)
+            )
+            aux_loss, _ = aux_loss_fn(aux_logits, targets)
+            l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
+            
+            aux_weight = config['training']['aux_weight']
+            l1_weight = config['training']['l1_weight']
+            
+            loss = main_loss + \
+                   aux_weight * aux_loss + \
+                   l1_weight * l1_loss
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()
@@ -267,6 +285,13 @@ def main():
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=config['training']['epochs'])
     
+    # Initialize AMP scaler
+    use_amp = config['training'].get('use_amp', False)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    
+    if use_amp:
+        print("\n✓ AMP (Automatic Mixed Precision) enabled - FP16 training")
+    
     # Get dataloaders
     print("\n" + "="*80)
     print("Loading dataset...")
@@ -298,7 +323,7 @@ def main():
         # Train
         train_loss, train_main, train_aux, train_l1 = train_epoch(
             model, train_loader, optimizer, main_loss_fn, 
-            aux_loss_fn, l1_loss_fn, config, epoch, device
+            aux_loss_fn, l1_loss_fn, config, epoch, device, scaler
         )
         
         # Evaluate

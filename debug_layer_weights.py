@@ -75,8 +75,8 @@ if diff_in_proj > 1e-5 or diff_A_log > 1e-5 or diff_D > 1e-5:
 else:
     print("\n   ✓ Weights loaded correctly")
 
-# 8. Test forward with a single layer
-print("\n8. Testing single layer forward pass...")
+# 8. Test forward with residual block (proper comparison)
+print("\n8. Testing layer 0 with FULL residual block...")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"   Device: {device}")
 
@@ -98,20 +98,39 @@ with torch.no_grad():
     print(f"   Samba embedding: mean={samba_emb.mean():.6f}, std={samba_emb.std():.6f}, "
           f"has_nan={torch.isnan(samba_emb).any()}")
     
-    # HF layer 0
+    # HF layer 0 (full residual block: norm -> mixer -> residual)
     hf_layer_0_out = hf_model.backbone.layers[0](hf_emb)
-    print(f"   HF layer 0 output: mean={hf_layer_0_out.mean():.6f}, std={hf_layer_0_out.std():.6f}, "
+    print(f"\n   HF layer 0 FULL block output: mean={hf_layer_0_out.mean():.6f}, std={hf_layer_0_out.std():.6f}, "
           f"has_nan={torch.isnan(hf_layer_0_out).any()}")
     
-    # Samba layer 0
+    # Samba layer 0 (with residual block)
     try:
-        samba_layer_0_out = samba_model.layers[0](samba_emb)
-        print(f"   Samba layer 0 output: mean={samba_layer_0_out.mean():.6f}, std={samba_layer_0_out.std():.6f}, "
+        # Replicate the residual block structure
+        residual = samba_emb
+        x = samba_model.layer_norms[0](samba_emb)
+        print(f"   After norm: mean={x.mean():.6f}, std={x.std():.6f}")
+        
+        x = samba_model.layers[0](x)
+        print(f"   After mixer: mean={x.mean():.6f}, std={x.std():.6f}, has_nan={torch.isnan(x).any()}")
+        
+        samba_layer_0_out = residual + x
+        print(f"   Samba layer 0 FULL block output: mean={samba_layer_0_out.mean():.6f}, std={samba_layer_0_out.std():.6f}, "
               f"has_nan={torch.isnan(samba_layer_0_out).any()}")
         
         # Compare
         diff = (hf_layer_0_out - samba_layer_0_out).abs().max()
-        print(f"   Layer 0 output max diff: {diff:.6f}")
+        print(f"\n   Layer 0 output max diff: {diff:.6f}")
+        
+        if diff > 1.0:
+            print(f"   ❌ Outputs don't match!")
+            
+            # Check norm weights
+            hf_norm = hf_model.backbone.layers[0].norm.weight
+            samba_norm = samba_model.layer_norms[0].weight
+            norm_diff = (hf_norm - samba_norm.cpu()).abs().max()
+            print(f"   Norm weight diff: {norm_diff:.6f}")
+        else:
+            print(f"   ✓ Outputs match!")
         
     except Exception as e:
         print(f"   ❌ Samba layer 0 forward failed: {e}")

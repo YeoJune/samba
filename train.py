@@ -58,7 +58,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         targets = targets.to(device)
         
         # Forward pass with AMP
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             # Forward pass (now requires targets for auxiliary decoder)
             main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
             
@@ -152,7 +152,7 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         targets = targets.to(device)
         
         # Forward pass with AMP
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             # Forward pass (requires targets for auxiliary decoder)
             main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
             

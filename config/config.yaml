@@ -62,10 +62,11 @@ dataset:
 
 # Logging
 logging:
+  exp_name: "samba_experiment" # Experiment name
   use_wandb: false
   project_name: "samba"
   log_interval: 10
-  save_dir: "checkpoints"
+  save_dir: "experiments"
 
 # Device
 device: "cuda" # or "cpu"

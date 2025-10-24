@@ -9,8 +9,6 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import argparse
 from tqdm import tqdm
-import wandb
-import os
 import yaml
 
 from model.samba import Samba
@@ -22,6 +20,7 @@ from utils.pretrained_loader import (
     verify_samba_weights, 
     load_pretrained_decoder
 )
+from utils.experiment import ExperimentLogger, CheckpointManager, MetricsTracker
 
 
 def load_config(config_path):
@@ -41,7 +40,7 @@ def parse_args():
 
 
 def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn, 
-                l1_loss_fn, config, epoch, device, scaler=None):
+                l1_loss_fn, config, epoch, device, logger, scaler=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -52,6 +51,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     total_aux_acc = 0
     
     use_amp = config['training'].get('use_amp', False)
+    log_interval = config['logging'].get('log_interval', 10)
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
@@ -61,9 +61,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         
         # Forward pass with AMP
         with torch.amp.autocast('cuda', enabled=use_amp):
-            # Forward pass (now requires targets for auxiliary decoder)
             main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
-            
             vocab_size = main_logits.size(-1)
             
             # Calculate losses
@@ -71,25 +69,21 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
                 main_logits.reshape(-1, vocab_size), 
                 targets.reshape(-1)
             )
-            
             aux_loss, aux_metrics = aux_loss_fn(aux_logits, targets)
             l1_loss, l1_metrics = l1_loss_fn(all_layer_outputs)
             
-            # Combined loss (3-Loss system)
+            # Combined loss
             aux_weight = config['training']['aux_weight']
             l1_weight = config['training']['l1_weight']
-            
-            loss = main_loss + \
-                   aux_weight * aux_loss + \
-                   l1_weight * l1_loss
+            loss = main_loss + aux_weight * aux_loss + l1_weight * l1_loss
         
-        # Calculate accuracies (outside autocast, detached from graph)
+        # Calculate accuracies
         with torch.no_grad():
             main_preds = main_logits.argmax(dim=-1)
             main_acc = (main_preds == targets).float().mean().item()
-        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
+        aux_acc = aux_metrics['aux_accuracy']
         
-        # Backward pass with AMP
+        # Backward pass
         optimizer.zero_grad()
         if use_amp and scaler is not None:
             scaler.scale(loss).backward()
@@ -108,7 +102,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             )
             optimizer.step()
         
-        # Accumulate losses
+        # Accumulate metrics
         total_loss += loss.item()
         total_main_loss += main_loss.item()
         total_aux_loss += aux_loss.item()
@@ -119,36 +113,34 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         # Update progress bar
         pbar.set_postfix({
             'loss': f"{loss.item():.4f}",
-            'main': f"{main_loss.item():.4f}",
-            'aux': f"{aux_loss.item():.4f}",
-            'l1': f"{l1_loss.item():.4f}",
             'main_acc': f"{main_acc:.3f}",
             'aux_acc': f"{aux_acc:.3f}",
             'sparsity': f"{l1_metrics['avg_near_zero_ratio']:.3f}"
         })
         
-        # Log to wandb
-        if config['logging']['use_wandb'] and batch_idx % config['logging']['log_interval'] == 0:
-            wandb.log({
-                'train/total_loss': loss.item(),
-                'train/main_loss': main_loss.item(),
-                'train/aux_loss': aux_loss.item(),
-                'train/l1_loss': l1_loss.item(),
-                'train/main_accuracy': main_acc,
-                'train/aux_accuracy': aux_acc,
-                'train/sparsity': l1_metrics['avg_near_zero_ratio'],
-                'train/l1_norm': l1_metrics['l1_loss'],
-                'step': epoch * len(dataloader) + batch_idx
-            })
+        # Log metrics
+        if batch_idx % log_interval == 0:
+            step = epoch * len(dataloader) + batch_idx
+            logger.log_metrics({
+                'total_loss': loss.item(),
+                'main_loss': main_loss.item(),
+                'aux_loss': aux_loss.item(),
+                'l1_loss': l1_loss.item(),
+                'main_accuracy': main_acc,
+                'aux_accuracy': aux_acc,
+                'sparsity': l1_metrics['avg_near_zero_ratio'],
+            }, step=step, prefix='train')
     
-    avg_loss = total_loss / len(dataloader)
-    avg_main_loss = total_main_loss / len(dataloader)
-    avg_aux_loss = total_aux_loss / len(dataloader)
-    avg_l1_loss = total_l1_loss / len(dataloader)
-    avg_main_acc = total_main_acc / len(dataloader)
-    avg_aux_acc = total_aux_acc / len(dataloader)
-    
-    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, avg_main_acc, avg_aux_acc
+    # Return average metrics
+    n = len(dataloader)
+    return {
+        'loss': total_loss / n,
+        'main_loss': total_main_loss / n,
+        'aux_loss': total_aux_loss / n,
+        'l1_loss': total_l1_loss / n,
+        'main_acc': total_main_acc / n,
+        'aux_acc': total_aux_acc / n
+    }
 
 
 @torch.no_grad()
@@ -168,11 +160,8 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         input_ids = input_ids.to(device)
         targets = targets.to(device)
         
-        # Forward pass with AMP
         with torch.amp.autocast('cuda', enabled=use_amp):
-            # Forward pass (requires targets for auxiliary decoder)
             main_logits, aux_logits, all_layer_outputs = model(input_ids, targets)
-            
             vocab_size = main_logits.size(-1)
             
             # Calculate losses
@@ -185,15 +174,12 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
             
             aux_weight = config['training']['aux_weight']
             l1_weight = config['training']['l1_weight']
-            
-            loss = main_loss + \
-                   aux_weight * aux_loss + \
-                   l1_weight * l1_loss
+            loss = main_loss + aux_weight * aux_loss + l1_weight * l1_loss
         
-        # Calculate accuracies (outside autocast, already in no_grad context)
+        # Calculate accuracies
         main_preds = main_logits.argmax(dim=-1)
         main_acc = (main_preds == targets).float().mean().item()
-        aux_acc = aux_metrics['aux_accuracy']  # already .item() in loss function
+        aux_acc = aux_metrics['aux_accuracy']
         
         total_loss += loss.item()
         total_main_loss += main_loss.item()
@@ -202,17 +188,19 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         total_main_acc += main_acc
         total_aux_acc += aux_acc
     
-    avg_loss = total_loss / len(dataloader)
-    avg_main_loss = total_main_loss / len(dataloader)
-    avg_aux_loss = total_aux_loss / len(dataloader)
-    avg_l1_loss = total_l1_loss / len(dataloader)
-    avg_main_acc = total_main_acc / len(dataloader)
-    avg_aux_acc = total_aux_acc / len(dataloader)
-    
-    # Get sparsity stats from all layer outputs
+    n = len(dataloader)
     sparsity_stats = model.get_sparsity_stats(all_layer_outputs)
     
-    return avg_loss, avg_main_loss, avg_aux_loss, avg_l1_loss, avg_main_acc, avg_aux_acc, sparsity_stats
+    return {
+        'loss': total_loss / n,
+        'main_loss': total_main_loss / n,
+        'aux_loss': total_aux_loss / n,
+        'l1_loss': total_l1_loss / n,
+        'main_acc': total_main_acc / n,
+        'aux_acc': total_aux_acc / n,
+        'sparsity': sparsity_stats['avg_near_zero_ratio'],
+        'l1_norm': sparsity_stats['avg_l1_norm']
+    }
 
 
 def main():
@@ -229,20 +217,30 @@ def main():
     # Set seed
     torch.manual_seed(config.get('seed', 42))
     
-    # Initialize wandb
-    if config['logging']['use_wandb']:
-        wandb.init(
-            project=config['logging']['project_name'], 
-            config=config
-        )
+    # Initialize experiment logger
+    exp_name = config['logging'].get('exp_name', 'samba_exp')
+    logger = ExperimentLogger(
+        exp_name=exp_name,
+        save_dir=config['logging'].get('save_dir', 'experiments'),
+        use_wandb=config['logging']['use_wandb'],
+        wandb_project=config['logging']['project_name'],
+        config=config
+    )
     
-    # Create save directory
-    os.makedirs(config['logging']['save_dir'], exist_ok=True)
+    # Initialize checkpoint manager
+    checkpoint_manager = CheckpointManager(
+        checkpoint_dir=logger.checkpoint_dir,
+        max_keep=3,
+        save_interval=1
+    )
+    
+    # Initialize metrics tracker
+    metrics_tracker = MetricsTracker()
     
     # Initialize model
-    print("\n" + "="*80)
-    print("Initializing model...")
-    print("="*80)
+    logger.log("="*80)
+    logger.log("Initializing model...")
+    logger.log("="*80)
     
     model_config = config['model']
     model = Samba(
@@ -260,29 +258,22 @@ def main():
         readout_mode=model_config.get('readout_mode', 'post')
     ).to(device)
     
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    print(f"Readout mode: {model_config.get('readout_mode', 'post')}")
+    logger.log(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    logger.log(f"Readout mode: {model_config.get('readout_mode', 'post')}")
     
     # Load pretrained weights
     if config['pretrained']['use_pretrained'] and not args.no_pretrained:
-        print("\n" + "="*80)
-        print("Loading pretrained weights...")
-        print("="*80)
+        logger.log("="*80)
+        logger.log("Loading pretrained weights...")
+        logger.log("="*80)
         
-        # Load Mamba backbone weights
         model = load_pretrained_samba(
             model,
             config['pretrained']['mamba_model'],
-            debug=True  # Show key mapping details
+            debug=True
         )
+        verify_samba_weights(model, config['pretrained']['mamba_model'])
         
-        # Verify Mamba weights
-        verify_samba_weights(
-            model,
-            config['pretrained']['mamba_model']
-        )
-        
-        # Load GPT-2 decoder weights
         model.readout.decoder = load_pretrained_decoder(
             model.readout.decoder,
             pretrained_name=config['pretrained']['decoder_model'],
@@ -290,15 +281,14 @@ def main():
             debug=True
         )
         
-        # Freeze backbone if specified
         if config['pretrained']['freeze_backbone']:
-            print("\nFreezing Mamba backbone (layers)...")
+            logger.log("Freezing Mamba backbone...")
             for layer in model.layers:
                 for param in layer.parameters():
                     param.requires_grad = False
-            print("✓ Backbone frozen (only readout will be trained)")
+            logger.log("✓ Backbone frozen")
     else:
-        print("\n⚠️ Training from scratch (no pretrained weights)")
+        logger.log("⚠️ Training from scratch")
     
     # Initialize losses
     main_loss_fn = nn.CrossEntropyLoss()
@@ -316,46 +306,41 @@ def main():
     # Initialize AMP scaler
     use_amp = config['training'].get('use_amp', False)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
-    
     if use_amp:
-        print("\n✓ AMP (Automatic Mixed Precision) enabled - FP16 training")
+        logger.log("✓ AMP (Automatic Mixed Precision) enabled")
     
     # Get dataloaders
-    print("\n" + "="*80)
-    print("Loading dataset...")
-    print("="*80)
+    logger.log("="*80)
+    logger.log("Loading dataset...")
+    logger.log("="*80)
     
     dataset_config = {
         **config['dataset'],
         'batch_size': config['training']['batch_size']
     }
-    
     train_loader, val_loader = get_wikitext_dataloaders(dataset_config)
     
-    print(f"✓ Dataset loaded: {config['dataset']['name']}")
-    print(f"✓ Train batches: {len(train_loader)}")
-    print(f"✓ Val batches: {len(val_loader)}")
+    logger.log(f"✓ Dataset: {config['dataset']['name']}")
+    logger.log(f"✓ Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
     
     # Training loop
-    print("\n" + "="*80)
-    print("Starting training...")
-    print("="*80)
-    
-    best_val_loss = float('inf')
+    logger.log("="*80)
+    logger.log("Starting training...")
+    logger.log("="*80)
     
     for epoch in range(config['training']['epochs']):
-        print(f"\n{'='*80}")
-        print(f"Epoch {epoch + 1}/{config['training']['epochs']}")
-        print(f"{'='*80}")
+        logger.log(f"\n{'='*80}")
+        logger.log(f"Epoch {epoch + 1}/{config['training']['epochs']}")
+        logger.log(f"{'='*80}")
         
         # Train
-        train_loss, train_main, train_aux, train_l1, train_main_acc, train_aux_acc = train_epoch(
+        train_metrics = train_epoch(
             model, train_loader, optimizer, main_loss_fn, 
-            aux_loss_fn, l1_loss_fn, config, epoch, device, scaler
+            aux_loss_fn, l1_loss_fn, config, epoch, device, logger, scaler
         )
         
         # Evaluate
-        val_loss, val_main, val_aux, val_l1, val_main_acc, val_aux_acc, sparsity_stats = evaluate(
+        val_metrics = evaluate(
             model, val_loader, main_loss_fn, aux_loss_fn, 
             l1_loss_fn, config, device
         )
@@ -363,54 +348,53 @@ def main():
         # Update scheduler
         scheduler.step()
         
-        # Print results
-        print(f"\nTrain Loss: {train_loss:.4f} (Main: {train_main:.4f}, "
-              f"Aux: {train_aux:.4f}, L1: {train_l1:.4f})")
-        print(f"Train Acc: Main: {train_main_acc:.4f}, Aux: {train_aux_acc:.4f}")
-        print(f"Val Loss: {val_loss:.4f} (Main: {val_main:.4f}, "
-              f"Aux: {val_aux:.4f}, L1: {val_l1:.4f})")
-        print(f"Val Acc: Main: {val_main_acc:.4f}, Aux: {val_aux_acc:.4f}")
-        print(f"Sparsity: {sparsity_stats['avg_near_zero_ratio']:.4f}, "
-              f"L1: {sparsity_stats['avg_l1_norm']:.4f}")
+        # Log epoch metrics
+        logger.log(f"\nTrain - Loss: {train_metrics['loss']:.4f}, "
+                  f"Main Acc: {train_metrics['main_acc']:.4f}, "
+                  f"Aux Acc: {train_metrics['aux_acc']:.4f}")
+        logger.log(f"Val - Loss: {val_metrics['loss']:.4f}, "
+                  f"Main Acc: {val_metrics['main_acc']:.4f}, "
+                  f"Aux Acc: {val_metrics['aux_acc']:.4f}, "
+                  f"Sparsity: {val_metrics['sparsity']:.4f}")
         
-        # Log to wandb
-        if config['logging']['use_wandb']:
-            wandb.log({
-                'epoch': epoch,
-                'train/epoch_loss': train_loss,
-                'train/epoch_main_acc': train_main_acc,
-                'train/epoch_aux_acc': train_aux_acc,
-                'val/total_loss': val_loss,
-                'val/main_loss': val_main,
-                'val/aux_loss': val_aux,
-                'val/l1_loss': val_l1,
-                'val/main_accuracy': val_main_acc,
-                'val/aux_accuracy': val_aux_acc,
-                'val/sparsity': sparsity_stats['avg_near_zero_ratio'],
-                'val/l1_norm': sparsity_stats['avg_l1_norm'],
-                'lr': optimizer.param_groups[0]['lr']
-            })
+        # Log to experiment logger
+        logger.log_metrics({
+            'epoch_loss': train_metrics['loss'],
+            'epoch_main_acc': train_metrics['main_acc'],
+            'epoch_aux_acc': train_metrics['aux_acc'],
+        }, step=epoch, prefix='train')
         
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_path = os.path.join(config['logging']['save_dir'], 'best_model.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'sparsity_stats': sparsity_stats,
-                'config': config
-            }, save_path)
-            print(f"✓ Saved best model to {save_path}")
+        logger.log_metrics({
+            **val_metrics,
+            'lr': optimizer.param_groups[0]['lr']
+        }, step=epoch, prefix='val')
+        
+        # Update metrics tracker
+        metrics_tracker.update({
+            'val_loss': val_metrics['loss'],
+            'val_main_acc': val_metrics['main_acc'],
+            'val_sparsity': val_metrics['sparsity']
+        })
+        
+        # Save checkpoint
+        is_best = checkpoint_manager.is_best(val_metrics['loss'], lower_is_better=True)
+        if checkpoint_manager.should_save(epoch):
+            checkpoint_manager.save(
+                model, optimizer, epoch, val_metrics, is_best=is_best
+            )
     
-    print("\n" + "="*80)
-    print("Training completed!")
-    print("="*80)
+    # Save final results
+    final_results = {
+        'final_epoch': config['training']['epochs'],
+        'best_val_loss': checkpoint_manager.best_metric,
+        'metrics_summary': metrics_tracker.get_summary()
+    }
+    logger.save_final_results(final_results)
     
-    if config['logging']['use_wandb']:
-        wandb.finish()
+    logger.log("="*80)
+    logger.log("Training completed!")
+    logger.log("="*80)
+    logger.finish()
 
 
 if __name__ == '__main__':

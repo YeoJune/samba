@@ -19,11 +19,16 @@ class Readout(nn.Module):
     
     def __init__(self, vocab_size, d_model, n_layers=24, 
                  decoder_n_layers=6, decoder_n_heads=12, 
-                 decoder_window_size=32, dropout=0.1):
+                 decoder_window_size=32, dropout=0.1,
+                 readout_mode="post"):  # NEW
         super().__init__()
-        
+        self.readout_mode = readout_mode  # NEW
+
+        # Adjust n_layers for pre-residual mode (includes initial embedding)
+        actual_n_layers = n_layers + 1 if readout_mode == "pre" else n_layers
+
         # 1. LSM-style learnable weights for linear mixing
-        self.layer_weights = nn.Parameter(torch.ones(n_layers))
+        self.layer_weights = nn.Parameter(torch.ones(actual_n_layers))
         
         # 2. Windowed decoder (GPT-2 based)
         self.decoder = Decoder(

@@ -44,7 +44,8 @@ class Samba(nn.Module):
         decoder_n_heads=12,
         decoder_window_size=32,
         decoder_dropout=0.1,
-        use_cuda=True
+        use_cuda=True,
+        readout_mode="post"  # NEW: "pre" or "post"
     ):
         super().__init__()
         
@@ -54,6 +55,7 @@ class Samba(nn.Module):
         self.n_layers = n_layers
         self.d_model = d_model
         self.use_cuda = use_cuda and MAMBA_SSM_AVAILABLE
+        self.readout_mode = readout_mode  # NEW
         
         # Embedding & Output (owned by Samba)
         self.embedding = nn.Embedding(vocab_size, d_model)
@@ -96,7 +98,8 @@ class Samba(nn.Module):
             decoder_n_layers=decoder_n_layers,
             decoder_n_heads=decoder_n_heads,
             decoder_window_size=decoder_window_size,
-            dropout=decoder_dropout
+            dropout=decoder_dropout,
+            readout_mode=readout_mode
         )
         
         # Share embeddings: Decoder uses same embedding as Samba backbone
@@ -117,30 +120,38 @@ class Samba(nn.Module):
         """
         # Embedding
         x = self.embedding(input_ids)
-        
-        # Process all layers and store ALL outputs
+        # Process all layers and store outputs according to readout_mode
         all_layer_outputs = []
-        
+
+        # Optional: include initial embedding for pre-residual readout
+        if self.readout_mode == "pre":
+            all_layer_outputs.append(x)
+
         for i, layer in enumerate(self.layers):
             # Residual block structure (matches HF Mamba)
             residual = x
-            x = self.layer_norms[i](x)  # RMSNorm
-            x = layer(x)                # Mamba layer
-            x = residual + x            # Residual connection
-            
-            # Store ALL layer outputs (not sampled)
-            all_layer_outputs.append(x)
+            x_norm = self.layer_norms[i](x)  # RMSNorm
+            x_block = layer(x_norm)          # Mamba layer output (before residual)
+            x = residual + x_block           # Residual connection
+
+            # Store outputs based on mode
+            if self.readout_mode == "pre":
+                # Pre-residual: store block output only (pure transformation)
+                all_layer_outputs.append(x_block)
+            else:  # "post"
+                # Post-residual: store accumulated output (with residual)
+                all_layer_outputs.append(x)
         
         # Main output (final layer)
         x = self.norm_f(x)
         main_logits = self.lm_head(x)
-        
-        # Auxiliary output (uses all 24 layer outputs)
+
+        # Auxiliary output (uses all layer outputs)
         if targets is not None:
             aux_logits = self.readout(all_layer_outputs, targets)
         else:
             aux_logits = None
-        
+
         return main_logits, aux_logits, all_layer_outputs
     
     def get_sparsity_stats(self, all_layer_outputs, threshold=1e-3):

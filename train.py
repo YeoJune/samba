@@ -256,10 +256,12 @@ def main():
         decoder_n_layers=model_config.get('decoder_n_layers', 6),
         decoder_n_heads=model_config.get('decoder_n_heads', 12),
         decoder_window_size=model_config.get('decoder_window_size', 32),
-        decoder_dropout=model_config.get('decoder_dropout', 0.1)
+        decoder_dropout=model_config.get('decoder_dropout', 0.1),
+        readout_mode=model_config.get('readout_mode', 'post')
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    print(f"Readout mode: {model_config.get('readout_mode', 'post')}")
     
     # Load pretrained weights
     if config['pretrained']['use_pretrained'] and not args.no_pretrained:

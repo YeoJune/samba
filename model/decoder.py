@@ -37,55 +37,137 @@ class WindowedAttn(nn.Module):
         Returns: (batch, seq_len, d_model)
         """
         B, S, D = x.shape
-        
         # Project to Q, K, V
         qkv = self.qkv_proj(x)  # (B, S, 3*D)
         q, k, v = qkv.chunk(3, dim=-1)  # Each (B, S, D)
-        
+
         # Reshape for multi-head attention
         q = q.view(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, S, D_h)
         k = k.view(B, S, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, S, self.n_heads, self.d_head).transpose(1, 2)
-        
-        # Attention scores
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, S, S)
-        
+
         # Create causal + windowed mask
-        # Each token can only attend to previous tokens within window_size
         if S <= self.window_size:
             # Use pre-registered mask for small sequences
             mask = self.causal_mask[:, :, :S, :S]
+            attn_mask = (mask == 0)  # Convert to bool for F.scaled_dot_product_attention
         else:
             # Create windowed causal mask on-the-fly
-            mask = torch.tril(torch.ones(S, S, device=x.device, dtype=x.dtype))
-            
-            # Apply window constraint: each position can only see last window_size tokens
+            mask = torch.tril(torch.ones(S, S, device=x.device, dtype=torch.bool))
+
+            # Apply window constraint
             for i in range(S):
                 if i >= self.window_size:
-                    mask[i, :i - self.window_size] = 0
-            
-            mask = mask.view(1, 1, S, S)
-        
-        # Apply mask
-        attn = attn.masked_fill(mask == 0, float('-inf'))
-        attn = torch.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        
-        # Apply attention to values
-        out = torch.matmul(attn, v)  # (B, H, S, D_h)
-        
+                    mask[i, :i - self.window_size] = False
+
+            attn_mask = ~mask  # Invert for masked_fill
+
+        # Use PyTorch 2.0+ optimized attention if available
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=False  # We provide explicit mask
+            )
+        else:
+            # Fallback to manual implementation
+            attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            attn = attn.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+            attn = torch.softmax(attn, dim=-1)
+            attn = self.dropout(attn)
+            out = torch.matmul(attn, v)
+
         # Reshape back
         out = out.transpose(1, 2).contiguous().view(B, S, D)
-        
+
         # Output projection
         out = self.out_proj(out)
         out = self.dropout(out)
+
+        return out
+
+
+class WindowedCrossAttn(nn.Module):
+    """Windowed cross-attention with PyTorch 2.0 optimization"""
+    
+    def __init__(self, d_model, n_heads, window_size, dropout=0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+        
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.window_size = window_size
+        self.scale = self.d_head ** -0.5
+        
+        # Q, K, V projections
+        self.q_proj = nn.Linear(d_model, d_model, bias=True)
+        self.k_proj = nn.Linear(d_model, d_model, bias=True)
+        self.v_proj = nn.Linear(d_model, d_model, bias=True)
+        self.out_proj = nn.Linear(d_model, d_model, bias=True)
+        self.dropout_p = dropout
+        
+    def forward(self, query, key, value):
+        """
+        query: (batch, seq_len, d_model) - decoder states
+        key, value: (batch, seq_len, d_model) - memory (encoder states)
+        Returns: (batch, seq_len, d_model)
+        """
+        B, S_q, D = query.shape
+        S_kv = key.shape[1]
+        
+        # Project Q, K, V
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
+        
+        # Reshape for multi-head
+        q = q.view(B, S_q, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, S_q, D_h)
+        k = k.view(B, S_kv, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, S_kv, self.n_heads, self.d_head).transpose(1, 2)
+        
+        # Create windowed mask for cross-attention
+        # Each query position can attend to key positions within window
+        if S_q <= self.window_size and S_kv <= self.window_size:
+            # No masking needed for short sequences
+            attn_mask = None
+        else:
+            # Create window mask: query[i] attends to key[max(0, i-window):i+1]
+            mask = torch.zeros(S_q, S_kv, device=query.device, dtype=torch.bool)
+            for i in range(S_q):
+                start = max(0, i - self.window_size + 1)
+                end = i + 1
+                mask[i, start:end] = True
+            attn_mask = ~mask  # Invert for masked_fill
+        
+        # Use PyTorch 2.0+ scaled_dot_product_attention for speed
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout_p if self.training else 0.0,
+                is_causal=False  # We handle masking manually
+            )
+        else:
+            # Fallback to manual implementation
+            attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            if attn_mask is not None:
+                attn = attn.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+            attn = torch.softmax(attn, dim=-1)
+            attn = torch.nn.functional.dropout(attn, p=self.dropout_p, training=self.training)
+            out = torch.matmul(attn, v)
+        
+        # Reshape back
+        out = out.transpose(1, 2).contiguous().view(B, S_q, D)
+        
+        # Output projection
+        out = self.out_proj(out)
         
         return out
 
 
 class DecoderLayer(nn.Module):
-    """Single decoder layer: windowed self-attn + cross-attn + FFN"""
+    """Single decoder layer: windowed self-attn + windowed cross-attn + FFN"""
     
     def __init__(self, d_model, n_heads, window_size, dropout=0.1):
         super().__init__()
@@ -94,8 +176,8 @@ class DecoderLayer(nn.Module):
         self.self_attn = WindowedAttn(d_model, n_heads, window_size, dropout)
         self.norm1 = nn.LayerNorm(d_model)
         
-        # Cross-attention (to Mamba memory)
-        self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        # Windowed cross-attention (to Mamba memory)
+        self.cross_attn = WindowedCrossAttn(d_model, n_heads, window_size, dropout)
         self.norm2 = nn.LayerNorm(d_model)
         
         # FFN (GPT-2 style: 4x expansion)
@@ -116,9 +198,9 @@ class DecoderLayer(nn.Module):
         # Windowed self-attention (GPT-2 style: pre-norm)
         x = x + self.self_attn(self.norm1(x))
         
-        # Cross-attention to Mamba memory
+        # Windowed cross-attention to Mamba memory
         x_norm = self.norm2(x)
-        attn_out, _ = self.cross_attn(x_norm, memory, memory)
+        attn_out = self.cross_attn(x_norm, memory, memory)
         x = x + attn_out
         
         # FFN

@@ -17,6 +17,8 @@ model:
   decoder_window_size: 32 # Windowed self-attention window size
   decoder_dropout: 0.1 # Dropout rate
 
+  readout_mode: "post" # "pre" or "post" - Readout mode for Mamba outputs
+
 # Pretrained Model
 pretrained:
   use_pretrained: true

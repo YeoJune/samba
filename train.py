@@ -54,6 +54,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     
     use_amp = config['training'].get('use_amp', False)
     log_interval = config['logging'].get('log_interval', 10)
+    pad_token_id = config['dataset'].get('pad_token_id', 50256)
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
@@ -83,8 +84,7 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         with torch.no_grad():
             main_preds = main_logits.argmax(dim=-1)
             # Calculate accuracy only on non-padding tokens
-            # Padding tokens are marked as -100 in targets
-            mask = (targets != -100)
+            mask = (targets != pad_token_id)
             if mask.sum() > 0:
                 correct = (main_preds == targets) & mask
                 main_acc = (correct.sum().float() / mask.sum().float()).item()
@@ -176,6 +176,7 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
     total_aux_perplexity = 0
     
     use_amp = config['training'].get('use_amp', False)
+    pad_token_id = config['dataset'].get('pad_token_id', 50256)
     
     for input_ids, targets in tqdm(dataloader, desc='Evaluating'):
         input_ids = input_ids.to(device)
@@ -200,8 +201,7 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         # Calculate accuracies and perplexity
         main_preds = main_logits.argmax(dim=-1)
         # Calculate accuracy only on non-padding tokens
-        # Padding tokens are marked as -100 in targets
-        mask = (targets != -100)
+        mask = (targets != pad_token_id)
         if mask.sum() > 0:
             correct = (main_preds == targets) & mask
             main_acc = (correct.sum().float() / mask.sum().float()).item()
@@ -325,10 +325,9 @@ def main():
         logger.log("⚠️ Training from scratch")
     
     # Initialize losses
-    # Use ignore_index=-100 to ignore padding tokens in loss calculation
-    # Note: We need to mark padding tokens in targets as -100
-    main_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-    aux_loss_fn = AuxLossWithMetrics(ignore_index=-100)
+    pad_token_id = config['dataset'].get('pad_token_id', 50256)
+    main_loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    aux_loss_fn = AuxLossWithMetrics(ignore_index=pad_token_id)
     l1_loss_fn = L1LossWithMetrics()
     
     # Initialize optimizer and scheduler

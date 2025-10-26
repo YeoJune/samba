@@ -69,10 +69,11 @@ class WikiTextDataset(Dataset):
     Uses sliding window for long documents
     """
     
-    def __init__(self, encodings, seq_len, stride):
+    def __init__(self, encodings, seq_len, stride, pad_token_id=50256):
         self.encodings = encodings
         self.seq_len = seq_len
         self.stride = stride
+        self.pad_token_id = pad_token_id
         
         # Calculate number of chunks
         self.num_chunks = 0
@@ -105,17 +106,12 @@ class WikiTextDataset(Dataset):
         if pad_length > 0:
             chunk = torch.cat([
                 chunk, 
-                torch.full((pad_length,), 50256, dtype=torch.long)  # PAD token
+                torch.full((pad_length,), self.pad_token_id, dtype=torch.long)
             ])
         
         # Split into input and target
         input_chunk = chunk[:-1]
-        target_chunk = chunk[1:].clone()
-        
-        # Replace padding tokens in targets with -100 (ignore_index for loss)
-        # Padding starts at position (original_length - 1)
-        if pad_length > 0:
-            target_chunk[-(pad_length):] = -100
+        target_chunk = chunk[1:]
         
         return input_chunk, target_chunk
 
@@ -183,9 +179,10 @@ def get_wikitext_dataloaders(config):
     
     seq_len = config.get('max_length', 512)
     stride = config.get('stride', 256)
+    pad_token_id = config.get('pad_token_id', 50256)
     
-    train_dataset = WikiTextDataset(train_encodings, seq_len, stride)
-    val_dataset = WikiTextDataset(val_encodings, seq_len, stride)
+    train_dataset = WikiTextDataset(train_encodings, seq_len, stride, pad_token_id)
+    val_dataset = WikiTextDataset(val_encodings, seq_len, stride, pad_token_id)
     
     print(f"Train dataset size: {len(train_dataset)} chunks")
     print(f"Validation dataset size: {len(val_dataset)} chunks")

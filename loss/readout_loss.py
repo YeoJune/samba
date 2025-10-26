@@ -44,13 +44,15 @@ class AuxLoss(nn.Module):
 class AuxLossWithMetrics(AuxLoss):
     """Auxiliary loss with additional metrics"""
     
+    def __init__(self, ignore_index=-100):
+        super().__init__(ignore_index=ignore_index)
+        self.ignore_index = ignore_index
+    
     def forward(self, aux_logits, targets):
         """
         Returns:
             loss: scalar
             metrics: dict with accuracy and perplexity
-        
-        Note: Padding tokens are marked as -100 in targets and ignored in loss/accuracy.
         """
         loss = super().forward(aux_logits, targets)
         
@@ -58,8 +60,8 @@ class AuxLossWithMetrics(AuxLoss):
         batch, seq_len, vocab_size = aux_logits.shape
         predictions = aux_logits.argmax(dim=-1)
         
-        # Create mask for non-padding tokens (-100 is ignore_index)
-        mask = (targets != -100)
+        # Create mask for non-padding tokens
+        mask = (targets != self.ignore_index)
         
         # Calculate accuracy only on valid (non-padding) tokens
         if mask.sum() > 0:

@@ -78,8 +78,10 @@ class Readout(nn.Module):
         # memory_shifted[:, 0, :] remains zeros (no previous context)
         
         # Step 3: Shift input_ids for autoregressive decoder input
-        # Use input_ids (which has proper pad tokens), not targets (which has -100)
-        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=50256)
+        # input_ids contains pad tokens (e.g., 50256 for GPT-2)
+        # We need to pass pad_token_id to shift_right for proper handling
+        pad_token_id = 50256  # GPT-2 pad token (should match config)
+        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=pad_token_id)
         
         # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
         # Use parent embedding for weight sharing

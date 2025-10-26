@@ -59,6 +59,7 @@ dataset:
   tokenizer: "gpt2"
   max_length: 512
   stride: 256 # For sliding window
+  pad_token_id: 50256 # GPT-2 EOS token used as padding
 
 # Logging
 logging:

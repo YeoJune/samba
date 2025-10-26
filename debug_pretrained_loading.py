@@ -46,6 +46,20 @@ def test_full_loading():
         print(f"  {key}: {samba_model.layers[0].state_dict()[key].shape}")
     print("  ...")
     
+    # Norm 타입 체크
+    print(f"\n🔍 Norm type check:")
+    print(f"  HF layer norm type: {type(hf_model.backbone.layers[0].norm).__name__}")
+    print(f"  Samba layer norm type: {type(samba_model.layer_norms[0]).__name__}")
+    print(f"  HF final norm type: {type(hf_model.backbone.norm_f).__name__}")
+    print(f"  Samba final norm type: {type(samba_model.norm_f).__name__}")
+    
+    # Norm 파라미터 확인
+    print(f"\n🔍 Norm parameters:")
+    hf_norm_keys = [k for k in hf_state.keys() if 'norm' in k][:5]
+    for key in hf_norm_keys:
+        print(f"  {key}: {hf_state[key].shape}")
+    print("  ...")
+    
     print("\n" + "="*80)
     print("🧪 Step 3: Manual loading test (all 24 layers)")
     print("="*80)

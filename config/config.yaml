@@ -33,7 +33,7 @@ pretrained:
 
 # Training Configuration
 training:
-  batch_size: 8 # Adjust based on VRAM (reduce if OOM)
+  batch_size: 16 # Adjust based on VRAM (reduce if OOM)
   seq_len: 512
   epochs: 3
   lr: 0.0001

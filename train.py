@@ -82,7 +82,14 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         # Calculate accuracies and perplexity
         with torch.no_grad():
             main_preds = main_logits.argmax(dim=-1)
-            main_acc = (main_preds == targets).float().mean().item()
+            # Calculate accuracy only on non-padding tokens
+            # Padding tokens are marked as -100 in targets
+            mask = (targets != -100)
+            if mask.sum() > 0:
+                correct = (main_preds == targets) & mask
+                main_acc = (correct.sum().float() / mask.sum().float()).item()
+            else:
+                main_acc = 0.0
             main_perplexity = torch.exp(main_loss).item()
             aux_perplexity = torch.exp(aux_loss).item()
         aux_acc = aux_metrics['aux_accuracy']
@@ -192,7 +199,14 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         
         # Calculate accuracies and perplexity
         main_preds = main_logits.argmax(dim=-1)
-        main_acc = (main_preds == targets).float().mean().item()
+        # Calculate accuracy only on non-padding tokens
+        # Padding tokens are marked as -100 in targets
+        mask = (targets != -100)
+        if mask.sum() > 0:
+            correct = (main_preds == targets) & mask
+            main_acc = (correct.sum().float() / mask.sum().float()).item()
+        else:
+            main_acc = 0.0
         main_perplexity = torch.exp(main_loss).item()
         aux_perplexity = torch.exp(aux_loss).item()
         aux_acc = aux_metrics['aux_accuracy']
@@ -311,8 +325,10 @@ def main():
         logger.log("⚠️ Training from scratch")
     
     # Initialize losses
-    main_loss_fn = nn.CrossEntropyLoss()
-    aux_loss_fn = AuxLossWithMetrics()
+    # Use ignore_index=-100 to ignore padding tokens in loss calculation
+    # Note: We need to mark padding tokens in targets as -100
+    main_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    aux_loss_fn = AuxLossWithMetrics(ignore_index=-100)
     l1_loss_fn = L1LossWithMetrics()
     
     # Initialize optimizer and scheduler

@@ -17,9 +17,9 @@ class AuxLoss(nn.Module):
     contains meaningful semantic information.
     """
     
-    def __init__(self):
+    def __init__(self, ignore_index=-100):
         super().__init__()
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index)
     
     def forward(self, aux_logits, targets):
         """
@@ -49,13 +49,24 @@ class AuxLossWithMetrics(AuxLoss):
         Returns:
             loss: scalar
             metrics: dict with accuracy and perplexity
+        
+        Note: Padding tokens are marked as -100 in targets and ignored in loss/accuracy.
         """
         loss = super().forward(aux_logits, targets)
         
-        # Calculate accuracy
+        # Calculate accuracy on non-padding tokens only
         batch, seq_len, vocab_size = aux_logits.shape
         predictions = aux_logits.argmax(dim=-1)
-        accuracy = (predictions == targets).float().mean()
+        
+        # Create mask for non-padding tokens (-100 is ignore_index)
+        mask = (targets != -100)
+        
+        # Calculate accuracy only on valid (non-padding) tokens
+        if mask.sum() > 0:
+            correct = (predictions == targets) & mask
+            accuracy = correct.sum().float() / mask.sum().float()
+        else:
+            accuracy = torch.tensor(0.0, device=aux_logits.device)
         
         # Calculate perplexity
         perplexity = torch.exp(loss)

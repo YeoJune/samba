@@ -101,15 +101,21 @@ class WikiTextDataset(Dataset):
         chunk = input_ids[start_idx:end_idx]
         
         # Pad if necessary
-        if len(chunk) < self.seq_len + 1:
+        pad_length = self.seq_len + 1 - len(chunk)
+        if pad_length > 0:
             chunk = torch.cat([
                 chunk, 
-                torch.full((self.seq_len + 1 - len(chunk),), 50256, dtype=torch.long)  # PAD token
+                torch.full((pad_length,), 50256, dtype=torch.long)  # PAD token
             ])
         
         # Split into input and target
         input_chunk = chunk[:-1]
-        target_chunk = chunk[1:]
+        target_chunk = chunk[1:].clone()
+        
+        # Replace padding tokens in targets with -100 (ignore_index for loss)
+        # Padding starts at position (original_length - 1)
+        if pad_length > 0:
+            target_chunk[-(pad_length):] = -100
         
         return input_chunk, target_chunk
 

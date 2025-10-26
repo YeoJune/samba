@@ -230,6 +230,9 @@ def test_combined_no_leakage():
     print("Test 5: Combined Integration - No Information Leakage")
     print("="*60)
     
+    # Set seed for reproducibility
+    torch.manual_seed(42)
+    
     B, S, D = 2, 8, 128
     vocab_size = 100
     
@@ -265,16 +268,47 @@ def test_combined_no_leakage():
         mem[:, t_test, :] = mem[:, t_test, :] + 100.0
         memory_B.append(mem)
     
+    # DEBUG: Verify memory difference
+    print(f"DEBUG: Checking memory differences...")
+    for i in range(4):
+        for pos in range(S):
+            diff = (memory_A[i][:, pos, :] - memory_B[i][:, pos, :]).abs().max().item()
+            if diff > 0.1:
+                print(f"  Layer {i}, pos {pos}: diff = {diff:.2f}")
+    
     with torch.no_grad():
         aux_logits_A = readout(memory_A, input_ids, targets)
         aux_logits_B = readout(memory_B, input_ids, targets)
         
+        # DEBUG: Check intermediate values
+        # Compute LSM mixing for both scenarios
+        weights = torch.nn.functional.softmax(readout.layer_weights, dim=0)
+        y_stacked_A = torch.stack(memory_A, dim=0)
+        y_stacked_B = torch.stack(memory_B, dim=0)
+        mixed_A = torch.einsum('l,lbsd->bsd', weights, y_stacked_A)
+        mixed_B = torch.einsum('l,lbsd->bsd', weights, y_stacked_B)
+        
+        print(f"\nDEBUG: After LSM mixing:")
+        for pos in range(S):
+            diff = (mixed_A[:, pos, :] - mixed_B[:, pos, :]).abs().max().item()
+            if diff > 0.1:
+                print(f"  Position {pos}: diff = {diff:.2f}")
+        
         # KEY TEST: predictions at positions < t_test should be identical
         # Because memory_shifted[pos] for pos < t_test uses memory[pos-1] which didn't change
+        print(f"\nDEBUG: Prediction differences:")
         for pos in range(t_test):
             diff = (aux_logits_A[:, pos, :] - aux_logits_B[:, pos, :]).abs().max().item()
-            assert diff < 1e-4, \
-                f"Position {pos}: prediction changed (diff={diff:.6f}) due to memory[{t_test}] change - LEAKAGE!"
+            print(f"  Position {pos}: diff = {diff:.6f}")
+            if pos > 0:  # Position 0 uses memory_shifted[0] = zeros, should be identical
+                # Positions 1-4 should be identical (use memory[0:4] which didn't change)
+                assert diff < 1e-4, \
+                    f"Position {pos}: prediction changed (diff={diff:.6f}) due to memory[{t_test}] change - LEAKAGE!"
+        
+        # Position 0 is special: uses zeros for memory_shifted[0]
+        diff_pos0 = (aux_logits_A[:, 0, :] - aux_logits_B[:, 0, :]).abs().max().item()
+        assert diff_pos0 < 1e-4, \
+            f"Position 0: should be identical (uses zero memory), diff={diff_pos0:.6f}"
         
         # Position t_test might have small difference due to cross-attention window
         # but should not see the current position's memory directly
@@ -286,10 +320,11 @@ def test_combined_no_leakage():
         # Because memory_shifted[t_test+1] = memory[t_test] which we changed
         if t_test + 1 < S:
             diff_after = (aux_logits_A[:, t_test+1, :] - aux_logits_B[:, t_test+1, :]).abs().max().item()
+            print(f"  Position {t_test+1}: diff = {diff_after:.6f} (should be large)")
             assert diff_after > 1.0, \
                 f"Position {t_test+1} should be strongly affected by memory[{t_test}] change (diff={diff_after:.6f})"
     
-    print(f"✓ Predictions at positions [0..{t_test}] unchanged when memory[{t_test}] changes")
+    print(f"\n✓ Predictions at positions [0..{t_test}] unchanged when memory[{t_test}] changes")
     print(f"✓ Prediction at position {t_test+1} IS affected (sees memory[{t_test}] via shifting)")
     print(f"✓ No information leakage: position t cannot see memory[t]")
     return True

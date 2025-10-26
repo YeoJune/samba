@@ -6,19 +6,23 @@ Debug script to verify mamba-ssm parameter loading
 import torch
 from transformers import AutoModelForCausalLM
 from model.samba import Samba
+from utils.pretrained_loader import load_pretrained_samba
 
-def compare_weights():
-    """HF Mamba와 Samba의 파라미터 비교"""
+
+def test_full_loading():
+    """전체 24개 레이어 로딩 테스트 + 실제 값 비교"""
     
     print("="*80)
-    print("🔍 Loading models...")
+    print("🔍 Step 1: Load models")
     print("="*80)
     
     # 1. HF Mamba 로드
+    print("Loading HuggingFace Mamba...")
     hf_model = AutoModelForCausalLM.from_pretrained("state-spaces/mamba-130m-hf")
     hf_state = hf_model.state_dict()
     
     # 2. Samba 생성 (pretrained 없이)
+    print("Creating Samba model...")
     samba_model = Samba(
         vocab_size=50280,
         d_model=768,
@@ -27,80 +31,148 @@ def compare_weights():
     )
     
     print("\n" + "="*80)
-    print("📊 HuggingFace Mamba structure (layer 0)")
+    print("📊 Step 2: Structure check (layer 0 sample)")
     print("="*80)
+    
     layer_0_keys = [k for k in hf_state.keys() if k.startswith("backbone.layers.0.")]
-    for key in sorted(layer_0_keys):
+    print(f"HF layer 0 keys: {len(layer_0_keys)}")
+    for key in sorted(layer_0_keys)[:3]:
         print(f"  {key}: {hf_state[key].shape}")
+    print("  ...")
     
-    print("\n" + "="*80)
-    print("📊 mamba-ssm structure (layer 0)")
-    print("="*80)
     samba_layer_0_keys = list(samba_model.layers[0].state_dict().keys())
-    for key in sorted(samba_layer_0_keys):
+    print(f"\nmamba-ssm layer 0 keys: {len(samba_layer_0_keys)}")
+    for key in sorted(samba_layer_0_keys)[:3]:
         print(f"  {key}: {samba_model.layers[0].state_dict()[key].shape}")
+    print("  ...")
     
     print("\n" + "="*80)
-    print("🔧 Key mapping test")
+    print("🧪 Step 3: Manual loading test (all 24 layers)")
     print("="*80)
     
-    # 테스트: layer 0의 파라미터 매핑
-    hf_mixer_prefix = "backbone.layers.0.mixer."
-    hf_mixer_keys = [k for k in hf_state.keys() if k.startswith(hf_mixer_prefix)]
+    # 전체 로딩 시도
+    total_missing = 0
+    total_unexpected = 0
+    failed_layers = []
     
-    print(f"\nHF mixer keys ({len(hf_mixer_keys)} total):")
-    for key in sorted(hf_mixer_keys):
-        local_key = key.replace(hf_mixer_prefix, "")
-        has_match = local_key in samba_model.layers[0].state_dict()
-        status = "✓" if has_match else "✗"
-        print(f"  {status} {local_key}: {hf_state[key].shape}")
+    for layer_idx in range(24):
+        hf_mixer_prefix = f"backbone.layers.{layer_idx}.mixer."
+        layer_state_dict = {}
+        
+        for key, value in hf_state.items():
+            if key.startswith(hf_mixer_prefix):
+                local_key = key.replace(hf_mixer_prefix, "")
+                layer_state_dict[local_key] = value
+        
+        if len(layer_state_dict) > 0:
+            missing, unexpected = samba_model.layers[layer_idx].load_state_dict(
+                layer_state_dict, strict=False
+            )
+            total_missing += len(missing)
+            total_unexpected += len(unexpected)
+            
+            if len(missing) > 0 or len(unexpected) > 0:
+                failed_layers.append(layer_idx)
+        else:
+            failed_layers.append(layer_idx)
+            print(f"  ✗ Layer {layer_idx}: No weights found!")
     
-    print(f"\nmamba-ssm keys ({len(samba_layer_0_keys)} total):")
-    for key in sorted(samba_layer_0_keys):
-        hf_key = hf_mixer_prefix + key
-        has_match = hf_key in hf_state
-        status = "✓" if has_match else "✗"
-        print(f"  {status} {key}: {samba_model.layers[0].state_dict()[key].shape}")
-    
-    print("\n" + "="*80)
-    print("🧪 Manual weight loading test (layer 0)")
-    print("="*80)
-    
-    # 수동으로 로딩 시도
-    layer_state_dict = {}
-    for key, value in hf_state.items():
-        if key.startswith(hf_mixer_prefix):
-            local_key = key.replace(hf_mixer_prefix, "")
-            layer_state_dict[local_key] = value
-    
-    print(f"\nExtracted {len(layer_state_dict)} keys from HF")
-    missing, unexpected = samba_model.layers[0].load_state_dict(layer_state_dict, strict=False)
-    
-    print(f"\n✓ load_state_dict completed")
-    print(f"  Missing keys: {len(missing)}")
-    if missing:
-        print(f"    {missing}")
-    print(f"  Unexpected keys: {len(unexpected)}")
-    if unexpected:
-        print(f"    {unexpected}")
-    
-    print("\n" + "="*80)
-    print("✅ Analysis complete")
-    print("="*80)
-    
-    # 요약
-    print("\n📝 Summary:")
-    print(f"  HF mixer params: {len(hf_mixer_keys)}")
-    print(f"  mamba-ssm params: {len(samba_layer_0_keys)}")
-    print(f"  Missing after load: {len(missing)}")
-    print(f"  Unexpected after load: {len(unexpected)}")
-    
-    if len(missing) > 0 or len(unexpected) > 0:
-        print("\n⚠️ Parameter mismatch detected!")
-        print("   This suggests the loading strategy needs adjustment.")
+    if failed_layers:
+        print(f"\n⚠️ Failed layers: {failed_layers}")
     else:
-        print("\n✓ All parameters matched successfully!")
+        print(f"\n✓ All 24 layers loaded successfully!")
+    
+    print(f"\nTotal missing keys: {total_missing}")
+    print(f"Total unexpected keys: {total_unexpected}")
+    
+    print("\n" + "="*80)
+    print("🔢 Step 4: Value comparison (layer 0 sample)")
+    print("="*80)
+    
+    # 값 비교
+    max_diffs = {}
+    for key in ['A_log', 'D', 'in_proj.weight', 'out_proj.weight']:
+        hf_key = f"backbone.layers.0.mixer.{key}"
+        if hf_key in hf_state:
+            hf_val = hf_state[hf_key]
+            samba_val = samba_model.layers[0].state_dict()[key]
+            diff = (hf_val - samba_val).abs().max().item()
+            max_diffs[key] = diff
+            print(f"  {key}: max_diff = {diff:.6e}")
+    
+    print("\n" + "="*80)
+    print("🔄 Step 5: Load using pretrained_loader")
+    print("="*80)
+    
+    # 새로운 모델로 pretrained_loader 테스트
+    samba_model_loaded = Samba(
+        vocab_size=50280,
+        d_model=768,
+        n_layers=24,
+        use_cuda=True
+    )
+    
+    samba_model_loaded = load_pretrained_samba(
+        samba_model_loaded,
+        pretrained_name="state-spaces/mamba-130m-hf",
+        debug=False
+    )
+    
+    print("\n" + "="*80)
+    print("✅ Step 6: Final verification")
+    print("="*80)
+    
+    # 전체 비교
+    print("\nComparing all layer weights...")
+    all_match = True
+    mismatches = []
+    
+    for layer_idx in range(24):
+        for key in samba_model_loaded.layers[layer_idx].state_dict().keys():
+            hf_key = f"backbone.layers.{layer_idx}.mixer.{key}"
+            if hf_key in hf_state:
+                hf_val = hf_state[hf_key]
+                samba_val = samba_model_loaded.layers[layer_idx].state_dict()[key]
+                diff = (hf_val - samba_val).abs().max().item()
+                
+                if diff > 1e-6:
+                    all_match = False
+                    mismatches.append((layer_idx, key, diff))
+    
+    if all_match:
+        print("✓ All weights match perfectly! (diff < 1e-6)")
+    else:
+        print(f"⚠️ Found {len(mismatches)} mismatches:")
+        for layer_idx, key, diff in mismatches[:5]:  # Show first 5
+            print(f"  Layer {layer_idx}.{key}: diff = {diff:.6e}")
+        if len(mismatches) > 5:
+            print(f"  ... and {len(mismatches) - 5} more")
+    
+    # Embedding & norm 체크
+    print("\nChecking embedding & norms...")
+    emb_diff = (samba_model_loaded.embedding.weight - hf_model.backbone.embeddings.weight).abs().max().item()
+    norm_diff = (samba_model_loaded.norm_f.weight - hf_model.backbone.norm_f.weight).abs().max().item()
+    
+    print(f"  Embedding: max_diff = {emb_diff:.6e}")
+    print(f"  Final norm: max_diff = {norm_diff:.6e}")
+    
+    print("\n" + "="*80)
+    print("📝 Summary")
+    print("="*80)
+    print(f"  Layers loaded: 24/24")
+    print(f"  Missing keys: {total_missing}")
+    print(f"  Unexpected keys: {total_unexpected}")
+    print(f"  Weight mismatches: {len(mismatches)}")
+    print(f"  Embedding match: {'✓' if emb_diff < 1e-6 else '✗'}")
+    print(f"  Norm match: {'✓' if norm_diff < 1e-6 else '✗'}")
+    
+    if len(mismatches) == 0 and emb_diff < 1e-6 and norm_diff < 1e-6:
+        print("\n✅ PASS: Pretrained loading is perfect!")
+        return True
+    else:
+        print("\n⚠️ FAIL: Pretrained loading needs fixing!")
+        return False
 
 
 if __name__ == "__main__":
-    compare_weights()
+    success = test_full_loading()

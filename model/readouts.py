@@ -53,6 +53,9 @@ class Readout(nn.Module):
             targets: (B, S) - for shift_right
         Returns:
             aux_logits: (B, S, vocab_size)
+        
+        IMPORTANT: When decoder generates token at position t, it should only see
+        memory up to position t-1 (not position t!). This prevents data leakage.
         """
         # Step 1: LSM-style linear mixing
         # Stack: (24, B, S, D)
@@ -64,14 +67,23 @@ class Readout(nn.Module):
         # Weighted sum: (B, S, D)
         memory = torch.einsum('l,lbsd->bsd', weights, y_stacked)
         
-        # Step 2: Shift targets for autoregressive input
+        # Step 2: Shift memory right by 1
+        # Decoder position t should only see memory[0:t], not memory[t]
+        # memory[t] contains info from input[t], which is used to predict target[t]
+        # So we shift: decoder position t sees memory[t-1]
+        B, S, D = memory.shape
+        memory_shifted = torch.zeros_like(memory)
+        memory_shifted[:, 1:, :] = memory[:, :-1, :].clone()
+        # memory_shifted[:, 0, :] remains zeros (no previous context)
+        
+        # Step 3: Shift targets for autoregressive input
         decoder_input = self.decoder.shift_right(targets)
         
-        # Step 3: Decoder (windowed self-attn + cross-attn to memory)
+        # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
         # Use parent embedding for weight sharing
-        decoder_output = self.decoder(decoder_input, memory, embedding_layer=self.parent_embedding)
+        decoder_output = self.decoder(decoder_input, memory_shifted, embedding_layer=self.parent_embedding)
         
-        # Step 4: Auxiliary prediction
+        # Step 5: Auxiliary prediction
         aux_logits = self.aux_head(decoder_output)
         
         return aux_logits

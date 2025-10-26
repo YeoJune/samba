@@ -67,7 +67,13 @@ class WindowedAttn(nn.Module):
 
 
 class WindowedCrossAttn(nn.Module):
-    """Windowed cross-attention - ULTRA OPTIMIZED"""
+    """Windowed cross-attention with CAUSAL constraint
+    
+    IMPORTANT: Cross-attention MUST be causal even with shifted memory!
+    - Position t can only attend to memory[0:t] (not memory[t+1:])
+    - Within that range, apply window constraint (last window_size positions)
+    - This ensures decoder position t only sees information up to input[t-1]
+    """
     
     def __init__(self, d_model, n_heads, window_size, dropout=0.1):
         super().__init__()
@@ -84,12 +90,15 @@ class WindowedCrossAttn(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model, bias=True)
         self.dropout_p = dropout
         
-        # Pre-compute window_size × window_size mask
+        # Pre-compute window_size × window_size mask with CAUSAL + WINDOW
         w = self.window_size
         q_idx = torch.arange(w).unsqueeze(1)
         k_idx = torch.arange(w).unsqueeze(0)
+        # Causal: can only see current and previous positions
         causal = k_idx <= q_idx
+        # Window: can only see last window_size positions
         window = k_idx >= (q_idx - w + 1)
+        # Combine both constraints
         self.register_buffer('window_mask', ~(causal & window), persistent=False)
     
     def forward(self, query, key, value):
@@ -106,17 +115,20 @@ class WindowedCrossAttn(nn.Module):
         
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         
-        # Apply mask
+        # Apply CAUSAL + WINDOW mask
         if S_q <= self.window_size and S_kv <= self.window_size:
             # Small: use pre-computed mask
             mask = self.window_mask[:S_q, :S_kv]
             attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         else:
-            # Large: vectorized mask
+            # Large: vectorized mask with BOTH causal and window constraints
             q_idx = torch.arange(S_q, device=query.device).unsqueeze(1)
             k_idx = torch.arange(S_kv, device=key.device).unsqueeze(0)
+            # Causal constraint: can only see up to current position
             causal = k_idx <= q_idx
+            # Window constraint: can only see last window_size positions
             window = k_idx >= (q_idx - self.window_size + 1)
+            # Combine both
             mask = ~(causal & window)
             attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         

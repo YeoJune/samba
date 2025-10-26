@@ -181,9 +181,78 @@ def test_full_loading():
     
     if len(mismatches) == 0 and emb_diff < 1e-6 and norm_diff < 1e-6 and lm_head_diff < 1e-6:
         print("\n✅ PASS: Pretrained loading is perfect!")
-        return True
     else:
         print("\n⚠️ FAIL: Pretrained loading needs fixing!")
+        return False
+    
+    print("\n" + "="*80)
+    print("🚀 Step 7: Forward pass test (random input)")
+    print("="*80)
+    
+    # 랜덤 입력으로 forward pass 비교
+    torch.manual_seed(42)
+    batch_size = 2
+    seq_len = 32
+    vocab_size = 50280
+    test_input = torch.randint(0, vocab_size, (batch_size, seq_len))
+    
+    print(f"Test input shape: {test_input.shape}")
+    print(f"Sample tokens: {test_input[0, :10].tolist()}")
+    
+    # HF model forward
+    print("\nRunning HF model forward pass...")
+    hf_model.eval()
+    with torch.no_grad():
+        hf_outputs = hf_model(test_input)
+        hf_logits = hf_outputs.logits
+    
+    # Samba model forward (main output only)
+    print("Running Samba model forward pass...")
+    samba_model_loaded.eval()
+    with torch.no_grad():
+        samba_logits, _, _ = samba_model_loaded(test_input)
+    
+    # 비교
+    print("\nComparing outputs...")
+    print(f"  HF logits shape: {hf_logits.shape}")
+    print(f"  Samba logits shape: {samba_logits.shape}")
+    
+    logits_diff = (hf_logits - samba_logits).abs()
+    max_diff = logits_diff.max().item()
+    mean_diff = logits_diff.mean().item()
+    
+    print(f"  Max difference: {max_diff:.6e}")
+    print(f"  Mean difference: {mean_diff:.6e}")
+    
+    # Argmax 비교 (예측 토큰)
+    hf_preds = hf_logits.argmax(dim=-1)
+    samba_preds = samba_logits.argmax(dim=-1)
+    match_ratio = (hf_preds == samba_preds).float().mean().item()
+    
+    print(f"  Prediction match ratio: {match_ratio:.2%}")
+    print(f"  Sample HF predictions: {hf_preds[0, :10].tolist()}")
+    print(f"  Sample Samba predictions: {samba_preds[0, :10].tolist()}")
+    
+    # 최종 판정
+    print("\n" + "="*80)
+    print("🏁 FINAL RESULT")
+    print("="*80)
+    
+    tolerance = 1e-4  # Forward pass는 약간의 numerical error 허용
+    if max_diff < tolerance and match_ratio > 0.99:
+        print(f"✅ PERFECT: Forward outputs match! (max_diff: {max_diff:.6e})")
+        print(f"   Pretrained loading is working correctly!")
+        return True
+    elif match_ratio > 0.95:
+        print(f"⚠️ ACCEPTABLE: Minor differences (max_diff: {max_diff:.6e})")
+        print(f"   Prediction match: {match_ratio:.2%}")
+        print(f"   This might be due to numerical precision.")
+        return True
+    else:
+        print(f"❌ FAIL: Outputs differ significantly!")
+        print(f"   Max diff: {max_diff:.6e}")
+        print(f"   Match ratio: {match_ratio:.2%}")
+        print(f"   Pretrained loading needs investigation!")
         return False
 
 

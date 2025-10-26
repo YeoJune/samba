@@ -277,12 +277,10 @@ def test_combined_no_leakage():
                 print(f"  Layer {i}, pos {pos}: diff = {diff:.2f}")
     
     with torch.no_grad():
-        aux_logits_A = readout(memory_A, input_ids, targets)
-        aux_logits_B = readout(memory_B, input_ids, targets)
-        
-        # DEBUG: Check intermediate values
-        # Compute LSM mixing for both scenarios
+        # DEBUG: Manually trace through readout forward pass
         weights = torch.nn.functional.softmax(readout.layer_weights, dim=0)
+        
+        # Step 1: LSM mixing
         y_stacked_A = torch.stack(memory_A, dim=0)
         y_stacked_B = torch.stack(memory_B, dim=0)
         mixed_A = torch.einsum('l,lbsd->bsd', weights, y_stacked_A)
@@ -294,16 +292,54 @@ def test_combined_no_leakage():
             if diff > 0.1:
                 print(f"  Position {pos}: diff = {diff:.2f}")
         
-        # KEY TEST: predictions at positions < t_test should be identical
-        # Because memory_shifted[pos] for pos < t_test uses memory[pos-1] which didn't change
+        # Step 2: Memory shifting
+        memory_shifted_A = torch.zeros_like(mixed_A)
+        memory_shifted_A[:, 1:, :] = mixed_A[:, :-1, :].clone()
+        
+        memory_shifted_B = torch.zeros_like(mixed_B)
+        memory_shifted_B[:, 1:, :] = mixed_B[:, :-1, :].clone()
+        
+        print(f"\nDEBUG: After memory shifting:")
+        for pos in range(S):
+            diff = (memory_shifted_A[:, pos, :] - memory_shifted_B[:, pos, :]).abs().max().item()
+            if diff > 0.1:
+                print(f"  Position {pos}: diff = {diff:.2f}")
+                
+        # Step 3: Decoder input shifting
+        decoder_input = readout.decoder.shift_right(input_ids, pad_token_id=readout.pad_token_id)
+        
+        # Step 4: Run decoder
+        print(f"\nDEBUG: Running decoder...")
+        print(f"  Input IDs are identical: {torch.all(input_ids == input_ids)}")
+        print(f"  Decoder input are identical: {torch.all(decoder_input == decoder_input)}")
+        
+        # Run full forward
+        aux_logits_A = readout(memory_A, input_ids, targets)
+        aux_logits_B = readout(memory_B, input_ids, targets)
+        
+        # KEY TEST: predictions at positions <= t_test should be identical
+        # Because memory_shifted[pos] uses memory[pos-1] which didn't change for pos <= t_test
         print(f"\nDEBUG: Prediction differences:")
-        for pos in range(t_test):
+        for pos in range(S):
             diff = (aux_logits_A[:, pos, :] - aux_logits_B[:, pos, :]).abs().max().item()
             print(f"  Position {pos}: diff = {diff:.6f}")
-            if pos > 0:  # Position 0 uses memory_shifted[0] = zeros, should be identical
-                # Positions 1-4 should be identical (use memory[0:4] which didn't change)
-                assert diff < 1e-4, \
-                    f"Position {pos}: prediction changed (diff={diff:.6f}) due to memory[{t_test}] change - LEAKAGE!"
+        
+        # Analyze: Which positions should be identical?
+        # memory_shifted[0] = zeros → pos 0 should be identical
+        # memory_shifted[1] = memory[0] (unchanged) → pos 1 should be identical
+        # ...
+        # memory_shifted[5] = memory[4] (unchanged) → pos 5 should be identical
+        # memory_shifted[6] = memory[5] (CHANGED!) → pos 6 should be different
+        
+        print(f"\nDEBUG: Analysis:")
+        print(f"  Positions [0..{t_test}] use memory_shifted[0..{t_test}] = memory[-1..{t_test-1}]")
+        print(f"  Since only memory[{t_test}] changed, positions [0..{t_test}] should be identical")
+        print(f"  Position {t_test+1} uses memory_shifted[{t_test+1}] = memory[{t_test}] (changed!)")
+        
+        for pos in range(t_test + 1):
+            diff = (aux_logits_A[:, pos, :] - aux_logits_B[:, pos, :]).abs().max().item()
+            assert diff < 1e-4, \
+                f"Position {pos}: prediction changed (diff={diff:.6f}) due to memory[{t_test}] change - LEAKAGE!"
         
         # Position 0 is special: uses zeros for memory_shifted[0]
         diff_pos0 = (aux_logits_A[:, 0, :] - aux_logits_B[:, 0, :]).abs().max().item()

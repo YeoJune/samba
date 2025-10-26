@@ -45,7 +45,8 @@ class Samba(nn.Module):
         decoder_window_size=32,
         decoder_dropout=0.1,
         use_cuda=True,
-        readout_mode="post"  # NEW: "pre" or "post"
+        readout_mode="post",
+        pad_token_id=None
     ):
         super().__init__()
         
@@ -55,7 +56,8 @@ class Samba(nn.Module):
         self.n_layers = n_layers
         self.d_model = d_model
         self.use_cuda = use_cuda and MAMBA_SSM_AVAILABLE
-        self.readout_mode = readout_mode  # NEW
+        self.readout_mode = readout_mode
+        self.pad_token_id = pad_token_id if pad_token_id is not None else 50256
         
         # Embedding & Output (owned by Samba)
         self.embedding = nn.Embedding(vocab_size, d_model)
@@ -99,7 +101,8 @@ class Samba(nn.Module):
             decoder_n_heads=decoder_n_heads,
             decoder_window_size=decoder_window_size,
             dropout=decoder_dropout,
-            readout_mode=readout_mode
+            readout_mode=readout_mode,
+            pad_token_id=pad_token_id
         )
         
         # Share embeddings: Decoder uses same embedding as Samba backbone

@@ -17,9 +17,10 @@ class AuxLoss(nn.Module):
     contains meaningful semantic information.
     """
     
-    def __init__(self, ignore_index=-100):
+    def __init__(self, ignore_index=None):
         super().__init__()
-        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        # Use pad_token_id as ignore_index (typically 50256 for GPT-2)
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index if ignore_index is not None else -100)
     
     def forward(self, aux_logits, targets):
         """
@@ -44,9 +45,9 @@ class AuxLoss(nn.Module):
 class AuxLossWithMetrics(AuxLoss):
     """Auxiliary loss with additional metrics"""
     
-    def __init__(self, ignore_index=-100):
+    def __init__(self, ignore_index=None):
         super().__init__(ignore_index=ignore_index)
-        self.ignore_index = ignore_index
+        self.ignore_index = ignore_index if ignore_index is not None else -100
     
     def forward(self, aux_logits, targets):
         """

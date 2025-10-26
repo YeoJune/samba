@@ -277,6 +277,7 @@ def main():
     logger.log("="*80)
     
     model_config = config['model']
+    pad_token_id = config['dataset'].get('pad_token_id', 50256)
     model = Samba(
         vocab_size=model_config['vocab_size'],
         d_model=model_config['d_model'],
@@ -289,7 +290,8 @@ def main():
         decoder_n_heads=model_config.get('decoder_n_heads', 12),
         decoder_window_size=model_config.get('decoder_window_size', 32),
         decoder_dropout=model_config.get('decoder_dropout', 0.1),
-        readout_mode=model_config.get('readout_mode', 'post')
+        readout_mode=model_config.get('readout_mode', 'post'),
+        pad_token_id=pad_token_id
     ).to(device)
     
     logger.log(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")

@@ -69,11 +69,11 @@ class WikiTextDataset(Dataset):
     Uses sliding window for long documents
     """
     
-    def __init__(self, encodings, seq_len, stride, pad_token_id=50256):
+    def __init__(self, encodings, seq_len, stride, pad_token_id=None):
         self.encodings = encodings
         self.seq_len = seq_len
         self.stride = stride
-        self.pad_token_id = pad_token_id
+        self.pad_token_id = pad_token_id if pad_token_id is not None else 50256
         
         # Calculate number of chunks
         self.num_chunks = 0

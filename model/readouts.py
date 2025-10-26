@@ -20,9 +20,10 @@ class Readout(nn.Module):
     def __init__(self, vocab_size, d_model, n_layers=24, 
                  decoder_n_layers=6, decoder_n_heads=12, 
                  decoder_window_size=32, dropout=0.1,
-                 readout_mode="post"):  # NEW
+                 readout_mode="post", pad_token_id=None):
         super().__init__()
-        self.readout_mode = readout_mode  # NEW
+        self.readout_mode = readout_mode
+        self.pad_token_id = pad_token_id if pad_token_id is not None else 50256
 
         # Adjust n_layers for pre-residual mode (includes initial embedding)
         actual_n_layers = n_layers + 1 if readout_mode == "pre" else n_layers
@@ -51,7 +52,7 @@ class Readout(nn.Module):
         Args:
             all_layer_outputs: list of 24 layer outputs [(B, S, D), ...]
             input_ids: (B, S) - for decoder input (with pad tokens)
-            targets: (B, S) - for loss calculation (with -100 for padding)
+            targets: (B, S) - for loss calculation (may have ignore_index for padding)
         Returns:
             aux_logits: (B, S, vocab_size)
         
@@ -78,10 +79,7 @@ class Readout(nn.Module):
         # memory_shifted[:, 0, :] remains zeros (no previous context)
         
         # Step 3: Shift input_ids for autoregressive decoder input
-        # input_ids contains pad tokens (e.g., 50256 for GPT-2)
-        # We need to pass pad_token_id to shift_right for proper handling
-        pad_token_id = 50256  # GPT-2 pad token (should match config)
-        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=pad_token_id)
+        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=self.pad_token_id)
         
         # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
         # Use parent embedding for weight sharing

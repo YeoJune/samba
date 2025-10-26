@@ -59,7 +59,7 @@ class Samba(nn.Module):
         
         # Embedding & Output (owned by Samba)
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.norm_f = nn.LayerNorm(d_model)
+        self.norm_f = RMSNorm(d_model)  # Use RMSNorm to match HF Mamba
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         
         # Tie weights

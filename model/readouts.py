@@ -46,11 +46,12 @@ class Readout(nn.Module):
         # Store reference to parent embedding (will be set by Samba)
         self.parent_embedding = None
     
-    def forward(self, all_layer_outputs, targets):
+    def forward(self, all_layer_outputs, input_ids, targets):
         """
         Args:
             all_layer_outputs: list of 24 layer outputs [(B, S, D), ...]
-            targets: (B, S) - for shift_right
+            input_ids: (B, S) - for decoder input (with pad tokens)
+            targets: (B, S) - for loss calculation (with -100 for padding)
         Returns:
             aux_logits: (B, S, vocab_size)
         
@@ -76,8 +77,9 @@ class Readout(nn.Module):
         memory_shifted[:, 1:, :] = memory[:, :-1, :].clone()
         # memory_shifted[:, 0, :] remains zeros (no previous context)
         
-        # Step 3: Shift targets for autoregressive input
-        decoder_input = self.decoder.shift_right(targets)
+        # Step 3: Shift input_ids for autoregressive decoder input
+        # Use input_ids (which has proper pad tokens), not targets (which has -100)
+        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=50256)
         
         # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
         # Use parent embedding for weight sharing

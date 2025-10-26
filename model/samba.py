@@ -148,7 +148,7 @@ class Samba(nn.Module):
 
         # Auxiliary output (uses all layer outputs)
         if targets is not None:
-            aux_logits = self.readout(all_layer_outputs, targets)
+            aux_logits = self.readout(all_layer_outputs, input_ids, targets)
         else:
             aux_logits = None
 

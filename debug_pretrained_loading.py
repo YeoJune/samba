@@ -156,6 +156,17 @@ def test_full_loading():
     print(f"  Embedding: max_diff = {emb_diff:.6e}")
     print(f"  Final norm: max_diff = {norm_diff:.6e}")
     
+    # LM head 체크 (중요!)
+    print("\nChecking LM head...")
+    lm_head_diff = (samba_model_loaded.lm_head.weight - hf_model.lm_head.weight).abs().max().item()
+    print(f"  LM head: max_diff = {lm_head_diff:.6e}")
+    
+    # Weight tying 확인
+    is_tied_samba = (samba_model_loaded.lm_head.weight.data_ptr() == samba_model_loaded.embedding.weight.data_ptr())
+    is_tied_hf = (hf_model.lm_head.weight.data_ptr() == hf_model.backbone.embeddings.weight.data_ptr())
+    print(f"  Samba weight tying: {'✓' if is_tied_samba else '✗'}")
+    print(f"  HF weight tying: {'✓' if is_tied_hf else '✗'}")
+    
     print("\n" + "="*80)
     print("📝 Summary")
     print("="*80)
@@ -165,8 +176,10 @@ def test_full_loading():
     print(f"  Weight mismatches: {len(mismatches)}")
     print(f"  Embedding match: {'✓' if emb_diff < 1e-6 else '✗'}")
     print(f"  Norm match: {'✓' if norm_diff < 1e-6 else '✗'}")
+    print(f"  LM head match: {'✓' if lm_head_diff < 1e-6 else '✗'}")
+    print(f"  Weight tying: {'✓' if is_tied_samba and is_tied_hf else '✗'}")
     
-    if len(mismatches) == 0 and emb_diff < 1e-6 and norm_diff < 1e-6:
+    if len(mismatches) == 0 and emb_diff < 1e-6 and norm_diff < 1e-6 and lm_head_diff < 1e-6:
         print("\n✅ PASS: Pretrained loading is perfect!")
         return True
     else:

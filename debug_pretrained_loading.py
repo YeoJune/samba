@@ -196,6 +196,13 @@ def test_full_loading():
     vocab_size = 50280
     test_input = torch.randint(0, vocab_size, (batch_size, seq_len))
     
+    # GPU로 이동
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    test_input = test_input.to(device)
+    hf_model = hf_model.to(device)
+    samba_model_loaded = samba_model_loaded.to(device)
+    
+    print(f"Device: {device}")
     print(f"Test input shape: {test_input.shape}")
     print(f"Sample tokens: {test_input[0, :10].tolist()}")
     

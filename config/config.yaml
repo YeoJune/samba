@@ -42,8 +42,8 @@ training:
   gradient_clip: 1.0
 
   # 3-Loss weights
-  aux_weight: 0.0 # λ_aux - Auxiliary decoder loss weight
-  l1_weight: 0.00 # λ_l1 - L1 sparsity loss weight
+  aux_weight: 0.1 # λ_aux - Auxiliary decoder loss weight
+  l1_weight: 0.01 # λ_l1 - L1 sparsity loss weight
 
   # VRAM optimization
   use_gradient_checkpointing: false # Enable if OOM

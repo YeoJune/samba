@@ -49,6 +49,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
     total_l1_loss = 0
     total_main_acc = 0
     total_aux_acc = 0
+    total_main_perplexity = 0
+    total_aux_perplexity = 0
     
     use_amp = config['training'].get('use_amp', False)
     log_interval = config['logging'].get('log_interval', 10)
@@ -77,10 +79,12 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
             l1_weight = config['training']['l1_weight']
             loss = main_loss + aux_weight * aux_loss + l1_weight * l1_loss
         
-        # Calculate accuracies
+        # Calculate accuracies and perplexity
         with torch.no_grad():
             main_preds = main_logits.argmax(dim=-1)
             main_acc = (main_preds == targets).float().mean().item()
+            main_perplexity = torch.exp(main_loss).item()
+            aux_perplexity = torch.exp(aux_loss).item()
         aux_acc = aux_metrics['aux_accuracy']
         
         # Backward pass
@@ -109,12 +113,16 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         total_l1_loss += l1_loss.item()
         total_main_acc += main_acc
         total_aux_acc += aux_acc
+        total_main_perplexity += main_perplexity
+        total_aux_perplexity += aux_perplexity
         
         # Update progress bar
         pbar.set_postfix({
             'loss': f"{loss.item():.4f}",
             'main_acc': f"{main_acc:.3f}",
             'aux_acc': f"{aux_acc:.3f}",
+            'main_ppl': f"{main_perplexity:.2f}",
+            'aux_ppl': f"{aux_perplexity:.2f}",
             'sparsity': f"{l1_metrics['avg_near_zero_ratio']:.3f}"
         })
         
@@ -128,6 +136,8 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
                 'l1_loss': l1_loss.item(),
                 'main_accuracy': main_acc,
                 'aux_accuracy': aux_acc,
+                'main_perplexity': main_perplexity,
+                'aux_perplexity': aux_perplexity,
                 'sparsity': l1_metrics['avg_near_zero_ratio'],
             }, step=step, prefix='train')
     
@@ -139,7 +149,9 @@ def train_epoch(model, dataloader, optimizer, main_loss_fn, aux_loss_fn,
         'aux_loss': total_aux_loss / n,
         'l1_loss': total_l1_loss / n,
         'main_acc': total_main_acc / n,
-        'aux_acc': total_aux_acc / n
+        'aux_acc': total_aux_acc / n,
+        'main_ppl': total_main_perplexity / n,
+        'aux_ppl': total_aux_perplexity / n
     }
 
 
@@ -153,6 +165,8 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
     total_l1_loss = 0
     total_main_acc = 0
     total_aux_acc = 0
+    total_main_perplexity = 0
+    total_aux_perplexity = 0
     
     use_amp = config['training'].get('use_amp', False)
     
@@ -176,9 +190,11 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
             l1_weight = config['training']['l1_weight']
             loss = main_loss + aux_weight * aux_loss + l1_weight * l1_loss
         
-        # Calculate accuracies
+        # Calculate accuracies and perplexity
         main_preds = main_logits.argmax(dim=-1)
         main_acc = (main_preds == targets).float().mean().item()
+        main_perplexity = torch.exp(main_loss).item()
+        aux_perplexity = torch.exp(aux_loss).item()
         aux_acc = aux_metrics['aux_accuracy']
         
         total_loss += loss.item()
@@ -187,6 +203,8 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         total_l1_loss += l1_loss.item()
         total_main_acc += main_acc
         total_aux_acc += aux_acc
+        total_main_perplexity += main_perplexity
+        total_aux_perplexity += aux_perplexity
     
     n = len(dataloader)
     sparsity_stats = model.get_sparsity_stats(all_layer_outputs)
@@ -198,6 +216,8 @@ def evaluate(model, dataloader, main_loss_fn, aux_loss_fn, l1_loss_fn, config, d
         'l1_loss': total_l1_loss / n,
         'main_acc': total_main_acc / n,
         'aux_acc': total_aux_acc / n,
+        'main_ppl': total_main_perplexity / n,
+        'aux_ppl': total_aux_perplexity / n,
         'sparsity': sparsity_stats['avg_near_zero_ratio'],
         'l1_norm': sparsity_stats['avg_l1_norm']
     }
@@ -351,10 +371,14 @@ def main():
         # Log epoch metrics
         logger.log(f"\nTrain - Loss: {train_metrics['loss']:.4f}, "
                   f"Main Acc: {train_metrics['main_acc']:.4f}, "
-                  f"Aux Acc: {train_metrics['aux_acc']:.4f}")
+                  f"Aux Acc: {train_metrics['aux_acc']:.4f}, "
+                  f"Main PPL: {train_metrics['main_ppl']:.2f}, "
+                  f"Aux PPL: {train_metrics['aux_ppl']:.2f}")
         logger.log(f"Val - Loss: {val_metrics['loss']:.4f}, "
                   f"Main Acc: {val_metrics['main_acc']:.4f}, "
                   f"Aux Acc: {val_metrics['aux_acc']:.4f}, "
+                  f"Main PPL: {val_metrics['main_ppl']:.2f}, "
+                  f"Aux PPL: {val_metrics['aux_ppl']:.2f}, "
                   f"Sparsity: {val_metrics['sparsity']:.4f}")
         
         # Log to experiment logger
@@ -362,6 +386,8 @@ def main():
             'epoch_loss': train_metrics['loss'],
             'epoch_main_acc': train_metrics['main_acc'],
             'epoch_aux_acc': train_metrics['aux_acc'],
+            'epoch_main_ppl': train_metrics['main_ppl'],
+            'epoch_aux_ppl': train_metrics['aux_ppl'],
         }, step=epoch, prefix='train')
         
         logger.log_metrics({

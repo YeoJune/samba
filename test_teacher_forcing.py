@@ -203,7 +203,7 @@ def test_full_model_integration():
         n_layers=2,
         d_state=16,
         d_conv=4,
-        expand=2,
+        expand_factor=2,
         decoder_n_layers=2,
         decoder_n_heads=4,
         decoder_window_size=16,
@@ -266,7 +266,7 @@ def test_no_data_leakage_with_model():
         n_layers=2,
         d_state=16,
         d_conv=4,
-        expand=2,
+        expand_factor=2,
         decoder_n_layers=2,
         decoder_n_heads=4,
         decoder_window_size=8,  # Small window

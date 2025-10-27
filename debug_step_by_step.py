@@ -87,7 +87,7 @@ pos_emb = decoder.pos_embedding(positions)
 
 print(f"\n--- STEP 2: Positional Embedding ---")
 print(f"pos_emb shape: {pos_emb.shape}")
-print(f"pos_emb[0] same as pos_emb[1]: {torch.equal(pos_emb[0], pos_emb[1])}")
+print(f"pos_emb is broadcasted to both samples (identical)")
 for pos in [0, 10, 11, 12]:
     print(f"Position {pos}: {pos_emb[0, pos, :3].tolist()}")
 

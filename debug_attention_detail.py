@@ -123,10 +123,10 @@ attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 attn_weights = torch.softmax(attn, dim=-1)
 
 print(f"\nAttention weights for position 10 (sample 0, head 0):")
-print(f"  {attn_weights[0, 0, 10].cpu().numpy()}")
+print(f"  {attn_weights[0, 0, 10].detach().cpu().numpy()}")
 
 print(f"\nAttention weights for position 10 (sample 1, head 0):")
-print(f"  {attn_weights[1, 0, 10].cpu().numpy()}")
+print(f"  {attn_weights[1, 0, 10].detach().cpu().numpy()}")
 
 print(f"\nPosition 10 attends to: {torch.where(~mask[10])[0].tolist()}")
 

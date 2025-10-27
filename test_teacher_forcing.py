@@ -290,6 +290,11 @@ def test_no_data_leakage_with_model():
         print("   Install with: pip install mamba-ssm causal-conv1d")
         return True  # Skip but don't fail
     
+    # Fix all random seeds
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+    
     vocab_size = 100
     
     model = Samba(
@@ -313,6 +318,11 @@ def test_no_data_leakage_with_model():
     
     model.eval()
     
+    # Fix seed again before generating data
+    torch.manual_seed(123)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(123)
+    
     # Longer sequence
     B, S = 1, 16
     input_ids = torch.randint(1, vocab_size, (B, S))
@@ -330,7 +340,11 @@ def test_no_data_leakage_with_model():
     print(f"Expected: Only positions that use targets[{t_test}] should differ\n")
     
     # Scenario A: normal
+    # Use torch.no_grad() and disable any randomness
     with torch.no_grad():
+        torch.manual_seed(999)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(999)
         _, aux_A, layers_A = model(input_ids, targets)
     
     # Scenario B: change target at position t_test
@@ -338,18 +352,26 @@ def test_no_data_leakage_with_model():
     targets_B[:, t_test] = (targets[:, t_test] + 50) % vocab_size
     
     with torch.no_grad():
+        torch.manual_seed(999)  # Same seed!
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(999)
         _, aux_B, layers_B = model(input_ids, targets_B)
     
     print(f"Changed targets[{t_test}]: {targets[0, t_test].item()} → {targets_B[0, t_test].item()}")
     
     # First verify: Mamba outputs should be IDENTICAL (doesn't use targets)
     print(f"\nVerifying Mamba backbone (should be identical):")
+    mamba_identical = True
     for i, (layer_A, layer_B) in enumerate(zip(layers_A, layers_B)):
         diff = (layer_A - layer_B).abs().max().item()
         if diff > 1e-6:
             print(f"  Layer {i}: diff={diff:.8f} ❌ MAMBA USES TARGETS!")
-            assert False, "Mamba backbone should not depend on targets!"
-    print(f"  ✓ All {len(layers_A)} Mamba layers identical (targets not used)")
+            mamba_identical = False
+    
+    if mamba_identical:
+        print(f"  ✓ All {len(layers_A)} Mamba layers identical (targets not used)")
+    else:
+        assert False, "Mamba backbone should not depend on targets!"
     
     # Now check auxiliary decoder predictions
     # Position t in decoder uses targets[t-1] as input (teacher forcing)
@@ -360,6 +382,7 @@ def test_no_data_leakage_with_model():
     print(f"  So changing targets[{t_test}] affects decoder_input[{t_test+1}]")
     print(f"\nPrediction differences:")
     
+    failed = False
     for pos in range(S):
         diff = (aux_A[:, pos, :] - aux_B[:, pos, :]).abs().max().item()
         
@@ -367,7 +390,9 @@ def test_no_data_leakage_with_model():
         if pos == t_test + 1:
             status = "✓" if diff > 0.1 else "❌"
             print(f"  Position {pos}: diff={diff:.6f} {status} (uses changed targets[{t_test}])")
-            assert diff > 0.1, f"Position {t_test+1} should use targets[{t_test}]!"
+            if diff <= 0.1:
+                print(f"    ERROR: Should use targets[{t_test}] as input!")
+                failed = True
         
         # Positions after t_test+1 may differ (error propagation in teacher forcing)
         elif pos > t_test + 1:
@@ -376,9 +401,13 @@ def test_no_data_leakage_with_model():
         
         # Positions <= t_test should be IDENTICAL
         else:
-            status = "✓" if diff < 0.01 else "❌"
+            status = "✓" if diff < 0.001 else "❌"
             print(f"  Position {pos}: diff={diff:.6f} {status} (should be identical)")
-            assert diff < 0.01, f"Position {pos} should not be affected by targets[{t_test}]!"
+            if diff >= 0.001:
+                print(f"    ERROR: Should not be affected by targets[{t_test}]!")
+                failed = True
+    
+    assert not failed, "Data leakage detected!"
     
     print(f"\n✓ No data leakage detected")
     print(f"✓ Only position {t_test+1} affected by targets[{t_test}] (teacher forcing)")

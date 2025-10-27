@@ -135,3 +135,42 @@ print(f"- Through multiple layers: Checking...")
 
 print(f"\nConclusion: Position 0 should NOT be affected by position 11 changes!")
 print(f"But the test shows it IS affected... Why?")
+
+# Check if model is actually in eval mode
+print(f"\n=== Checking model training state ===")
+print(f"Model training: {model.training}")
+print(f"Readout training: {model.readout.training}")
+print(f"Decoder training: {model.readout.decoder.training}")
+
+# Check dropout state
+decoder = model.readout.decoder
+print(f"\nDecoder dropout: {decoder.dropout.training}")
+for i, layer in enumerate(decoder.layers):
+    print(f"Layer {i}:")
+    print(f"  Self-attn dropout: {layer.self_attn.dropout.training}")
+    print(f"  Cross-attn dropout: {layer.cross_attn.dropout_p}")
+    print(f"  FFN dropout[0]: {layer.ffn[2].training}")
+    print(f"  FFN dropout[1]: {layer.ffn[4].training}")
+
+# Actually run the decoder to see outputs
+print(f"\n=== Running decoder forward ===")
+with torch.no_grad():
+    decoder_output = readout.decoder(decoder_input, memory_shifted, embedding_layer=readout.parent_embedding)
+
+print(f"Decoder output shape: {decoder_output.shape}")
+decoder_output_diff = (decoder_output[0] - decoder_output[1]).abs()
+print(f"\nDecoder output diffs by position:")
+for pos in range(S):
+    diff = decoder_output_diff[pos].max().item()
+    status = "DIFF" if diff > 0.01 else "SAME"
+    print(f"  Position {pos}: {diff:.6f} {status}")
+
+# Final aux logits
+aux_head_output = readout.aux_head(decoder_output)
+print(f"\nAux head output shape: {aux_head_output.shape}")
+aux_diff = (aux_head_output[0] - aux_head_output[1]).abs()
+print(f"\nAux logits diffs by position:")
+for pos in range(S):
+    diff = aux_diff[pos].max().item()
+    status = "DIFF" if diff > 0.01 else "SAME"
+    print(f"  Position {pos}: {diff:.6f} {status}")

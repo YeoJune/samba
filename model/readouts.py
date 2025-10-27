@@ -78,8 +78,10 @@ class Readout(nn.Module):
         memory_shifted[:, 1:, :] = memory[:, :-1, :].clone()
         # memory_shifted[:, 0, :] remains zeros (no previous context)
         
-        # Step 3: Shift input_ids for autoregressive decoder input
-        decoder_input = self.decoder.shift_right(input_ids, pad_token_id=self.pad_token_id)
+        # Step 3: Shift targets for autoregressive decoder input (Teacher Forcing)
+        # During training, decoder receives ground truth previous token
+        # decoder_input[t] = targets[t-1] to predict targets[t]
+        decoder_input = self.decoder.shift_right(targets, pad_token_id=self.pad_token_id)
         
         # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
         # Use parent embedding for weight sharing

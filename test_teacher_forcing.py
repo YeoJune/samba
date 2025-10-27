@@ -290,10 +290,16 @@ def test_no_data_leakage_with_model():
         print("   Install with: pip install mamba-ssm causal-conv1d")
         return True  # Skip but don't fail
     
-    # Fix all random seeds
+    # Fix all random seeds and enforce deterministic behavior
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+    
+    # Force deterministic CUDA operations
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     vocab_size = 100
     
@@ -323,53 +329,53 @@ def test_no_data_leakage_with_model():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(123)
     
-    # Longer sequence
-    B, S = 1, 16
+    # Use BATCH to compare - single forward pass!
+    B, S = 2, 16  # 2 samples in batch
     input_ids = torch.randint(1, vocab_size, (B, S))
     targets = torch.randint(1, vocab_size, (B, S))
+    
+    # Make inputs IDENTICAL for both samples
+    input_ids[1, :] = input_ids[0, :]
+    targets[1, :] = targets[0, :]
+    
+    # Position to modify
+    t_test = 10
+    
+    # Change targets[t_test] ONLY for sample 1
+    targets[1, t_test] = (targets[0, t_test] + 50) % vocab_size
     
     if torch.cuda.is_available():
         input_ids = input_ids.cuda()
         targets = targets.cuda()
     
-    # Position to modify
-    t_test = 10
-    
-    print(f"KEY INSIGHT: Mamba uses input_ids, auxiliary decoder uses targets")
-    print(f"Test: Keep input_ids SAME, change targets[{t_test}]")
+    print(f"KEY INSIGHT: Using BATCH to eliminate randomness")
+    print(f"  Sample 0: input_ids[0], targets[0] (reference)")
+    print(f"  Sample 1: input_ids[1]=input_ids[0], targets[1] with targets[{t_test}] changed")
     print(f"Expected: Only positions that use targets[{t_test}] should differ\n")
     
-    # Scenario A: normal
-    # Use torch.no_grad() and disable any randomness
+    # Single forward pass - processes both samples together
     with torch.no_grad():
-        torch.manual_seed(999)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(999)
-        _, aux_A, layers_A = model(input_ids, targets)
+        _, aux_logits, all_layers = model(input_ids, targets)
     
-    # Scenario B: change target at position t_test
-    targets_B = targets.clone()
-    targets_B[:, t_test] = (targets[:, t_test] + 50) % vocab_size
+    # Extract outputs for each sample
+    aux_A = aux_logits[0]  # Sample 0
+    aux_B = aux_logits[1]  # Sample 1
     
-    with torch.no_grad():
-        torch.manual_seed(999)  # Same seed!
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(999)
-        _, aux_B, layers_B = model(input_ids, targets_B)
-    
-    print(f"Changed targets[{t_test}]: {targets[0, t_test].item()} → {targets_B[0, t_test].item()}")
+    print(f"Changed targets[{t_test}]: {targets[0, t_test].item()} → {targets[1, t_test].item()}")
     
     # First verify: Mamba outputs should be IDENTICAL (doesn't use targets)
     print(f"\nVerifying Mamba backbone (should be identical):")
     mamba_identical = True
-    for i, (layer_A, layer_B) in enumerate(zip(layers_A, layers_B)):
+    for i in range(len(all_layers)):
+        layer_A = all_layers[i][0]  # Sample 0
+        layer_B = all_layers[i][1]  # Sample 1
         diff = (layer_A - layer_B).abs().max().item()
         if diff > 1e-6:
             print(f"  Layer {i}: diff={diff:.8f} ❌ MAMBA USES TARGETS!")
             mamba_identical = False
     
     if mamba_identical:
-        print(f"  ✓ All {len(layers_A)} Mamba layers identical (targets not used)")
+        print(f"  ✓ All {len(all_layers)} Mamba layers identical (targets not used)")
     else:
         assert False, "Mamba backbone should not depend on targets!"
     
@@ -384,7 +390,7 @@ def test_no_data_leakage_with_model():
     
     failed = False
     for pos in range(S):
-        diff = (aux_A[:, pos, :] - aux_B[:, pos, :]).abs().max().item()
+        diff = (aux_A[pos, :] - aux_B[pos, :]).abs().max().item()
         
         # Position t_test+1 should differ (uses changed targets[t_test] as input)
         if pos == t_test + 1:

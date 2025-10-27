@@ -325,40 +325,64 @@ def test_no_data_leakage_with_model():
     # Position to modify
     t_test = 10
     
+    print(f"KEY INSIGHT: Mamba uses input_ids, auxiliary decoder uses targets")
+    print(f"Test: Keep input_ids SAME, change targets[{t_test}]")
+    print(f"Expected: Only positions that use targets[{t_test}] should differ\n")
+    
     # Scenario A: normal
     with torch.no_grad():
-        _, aux_A, _ = model(input_ids, targets)
+        _, aux_A, layers_A = model(input_ids, targets)
     
     # Scenario B: change target at position t_test
     targets_B = targets.clone()
     targets_B[:, t_test] = (targets[:, t_test] + 50) % vocab_size
     
     with torch.no_grad():
-        _, aux_B, _ = model(input_ids, targets_B)
+        _, aux_B, layers_B = model(input_ids, targets_B)
     
     print(f"Changed targets[{t_test}]: {targets[0, t_test].item()} → {targets_B[0, t_test].item()}")
     
+    # First verify: Mamba outputs should be IDENTICAL (doesn't use targets)
+    print(f"\nVerifying Mamba backbone (should be identical):")
+    for i, (layer_A, layer_B) in enumerate(zip(layers_A, layers_B)):
+        diff = (layer_A - layer_B).abs().max().item()
+        if diff > 1e-6:
+            print(f"  Layer {i}: diff={diff:.8f} ❌ MAMBA USES TARGETS!")
+            assert False, "Mamba backbone should not depend on targets!"
+    print(f"  ✓ All {len(layers_A)} Mamba layers identical (targets not used)")
+    
+    # Now check auxiliary decoder predictions
+    # Position t in decoder uses targets[t-1] as input (teacher forcing)
+    # So changing targets[t_test] affects position t_test+1
+    
+    print(f"\nAuxiliary decoder predictions:")
+    print(f"  decoder_input[t] = shift_right(targets)[t] = targets[t-1]")
+    print(f"  So changing targets[{t_test}] affects decoder_input[{t_test+1}]")
     print(f"\nPrediction differences:")
+    
     for pos in range(S):
         diff = (aux_A[:, pos, :] - aux_B[:, pos, :]).abs().max().item()
         
-        if pos <= t_test:
-            # These should be identical (don't see future)
-            status = "✓" if diff < 0.01 else "❌"
-            print(f"  Position {pos}: diff={diff:.6f} {status}")
-            if pos < t_test and diff > 0.01:
-                print(f"    WARNING: Position {pos} affected by change at {t_test}!")
+        # Position t_test+1 should differ (uses changed targets[t_test] as input)
+        if pos == t_test + 1:
+            status = "✓" if diff > 0.1 else "❌"
+            print(f"  Position {pos}: diff={diff:.6f} {status} (uses changed targets[{t_test}])")
+            assert diff > 0.1, f"Position {t_test+1} should use targets[{t_test}]!"
+        
+        # Positions after t_test+1 may differ (error propagation in teacher forcing)
+        elif pos > t_test + 1:
+            status = "~" if diff > 0.01 else "✓"
+            print(f"  Position {pos}: diff={diff:.6f} {status} (may propagate)")
+        
+        # Positions <= t_test should be IDENTICAL
         else:
-            # These should be different (see the change through teacher forcing)
-            status = "✓" if diff > 0.01 else "?"
-            print(f"  Position {pos}: diff={diff:.6f} {status} (should differ)")
+            status = "✓" if diff < 0.01 else "❌"
+            print(f"  Position {pos}: diff={diff:.6f} {status} (should be identical)")
+            assert diff < 0.01, f"Position {pos} should not be affected by targets[{t_test}]!"
     
-    # Key test: early positions should be unaffected
-    for pos in range(min(5, t_test)):
-        diff = (aux_A[:, pos, :] - aux_B[:, pos, :]).abs().max().item()
-        assert diff < 0.01, f"Position {pos} should not be affected by change at {t_test}!"
-    
-    print(f"\n✓ No data leakage detected in full model")
+    print(f"\n✓ No data leakage detected")
+    print(f"✓ Only position {t_test+1} affected by targets[{t_test}] (teacher forcing)")
+    print(f"✓ Positions [0..{t_test}] unaffected (correct causality)")
     return True
 
 

@@ -141,7 +141,21 @@ for pos in range(S):
 # Compute output
 out = torch.matmul(attn_weights, v)
 
-print(f"\nOutput diff for position 10: {(out[0, :, 10, :] - out[1, :, 10, :]).abs().max().item():.6f}")
+print(f"\nOutput after matmul (before out_proj):")
+print(f"  Position 10: {(out[0, :, 10, :] - out[1, :, 10, :]).abs().max().item():.6f}")
+
+# Apply out_proj
+out = out.transpose(1, 2).contiguous().view(B, S, D)
+out = self_attn.out_proj(out)
+
+print(f"\nOutput after out_proj:")
+print(f"  Position 10: {(out[0, 10] - out[1, 10]).abs().max().item():.6f}")
+
+# Apply dropout
+out = self_attn.dropout(out)
+
+print(f"\nOutput after dropout (final):")
+print(f"  Position 10: {(out[0, 10] - out[1, 10]).abs().max().item():.6f}")
 
 print(f"\n" + "="*70)
 print(f"FINDING:")

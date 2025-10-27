@@ -26,7 +26,11 @@ class WindowedAttn(nn.Module):
         # Pre-compute ONLY window_size × window_size mask
         w = self.window_size
         indices = torch.arange(w)
-        mask = indices.unsqueeze(1) <= indices.unsqueeze(0)  # Causal
+        # Causal mask: q can only attend to k where k <= q
+        # Shape: (Q, K) for attention matrix [B, H, Q, K]
+        q_idx = indices.unsqueeze(1)  # (w, 1)
+        k_idx = indices.unsqueeze(0)  # (1, w)
+        mask = k_idx <= q_idx  # (w, w) - True where allowed
         self.register_buffer('window_mask', ~mask, persistent=False)
     
     def forward(self, x):
@@ -50,8 +54,13 @@ class WindowedAttn(nn.Module):
         else:
             # Large: vectorized mask (still no Python loops!)
             idx = torch.arange(S, device=x.device)
-            causal = idx.unsqueeze(1) <= idx.unsqueeze(0)
-            window = idx.unsqueeze(1) >= (idx.unsqueeze(0) - self.window_size + 1)
+            # Causal: q can only attend to k where k <= q
+            # Shape: (Q, K)
+            q_idx = idx.unsqueeze(1)  # (S, 1)
+            k_idx = idx.unsqueeze(0)  # (1, S)
+            causal = k_idx <= q_idx  # (S, S)
+            # Window: only attend to last window_size positions
+            window = k_idx >= (q_idx - self.window_size + 1)
             mask = ~(causal & window)
             attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         

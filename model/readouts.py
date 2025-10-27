@@ -47,17 +47,21 @@ class Readout(nn.Module):
         # Store reference to parent embedding (will be set by Samba)
         self.parent_embedding = None
     
-    def forward(self, all_layer_outputs, input_ids, targets):
+    def forward(self, all_layer_outputs, targets=None):
         """
         Args:
             all_layer_outputs: list of 24 layer outputs [(B, S, D), ...]
-            input_ids: (B, S) - for decoder input (with pad tokens)
-            targets: (B, S) - for loss calculation (may have ignore_index for padding)
+            targets: (B, S) - for training (teacher forcing). None for inference.
         Returns:
             aux_logits: (B, S, vocab_size)
         
-        IMPORTANT: When decoder generates token at position t, it should only see
-        memory up to position t-1 (not position t!). This prevents data leakage.
+        Training mode (targets provided):
+            - Uses teacher forcing: decoder_input[t] = targets[t-1]
+            - Parallel processing of all positions
+        
+        Inference mode (targets=None):
+            - Uses auto-regressive generation: decoder_input[t] = predicted[t-1]
+            - Sequential generation position by position
         """
         # Step 1: LSM-style linear mixing
         # Stack: (24, B, S, D)
@@ -78,16 +82,39 @@ class Readout(nn.Module):
         memory_shifted[:, 1:, :] = memory[:, :-1, :].clone()
         # memory_shifted[:, 0, :] remains zeros (no previous context)
         
-        # Step 3: Shift targets for autoregressive decoder input (Teacher Forcing)
-        # During training, decoder receives ground truth previous token
-        # decoder_input[t] = targets[t-1] to predict targets[t]
-        decoder_input = self.decoder.shift_right(targets, pad_token_id=self.pad_token_id)
-        
-        # Step 4: Decoder (windowed self-attn + cross-attn to shifted memory)
-        # Use parent embedding for weight sharing
-        decoder_output = self.decoder(decoder_input, memory_shifted, embedding_layer=self.parent_embedding)
-        
-        # Step 5: Auxiliary prediction
-        aux_logits = self.aux_head(decoder_output)
+        # Step 3: Prepare decoder input
+        if targets is not None:
+            # Training mode: Teacher Forcing
+            # decoder_input[t] = targets[t-1] to predict targets[t]
+            decoder_input = self.decoder.shift_right(targets, pad_token_id=self.pad_token_id)
+            
+            # Step 4: Decoder forward (parallel)
+            decoder_output = self.decoder(decoder_input, memory_shifted, embedding_layer=self.parent_embedding)
+            
+            # Step 5: Auxiliary prediction
+            aux_logits = self.aux_head(decoder_output)
+            
+        else:
+            # Inference mode: Auto-regressive generation
+            # Generate position by position, using previous predictions
+            decoder_input = torch.full((B, S), self.pad_token_id, dtype=torch.long, device=memory.device)
+            aux_logits = torch.zeros(B, S, self.aux_head.out_features, device=memory.device)
+            
+            for t in range(S):
+                # Decoder input up to position t
+                current_input = decoder_input[:, :t+1]
+                current_memory = memory_shifted[:, :t+1, :]
+                
+                # Forward through decoder
+                decoder_output = self.decoder(current_input, current_memory, embedding_layer=self.parent_embedding)
+                
+                # Get logits for position t
+                logits_t = self.aux_head(decoder_output[:, -1, :])  # (B, vocab_size)
+                aux_logits[:, t, :] = logits_t
+                
+                # Sample/argmax for next position input
+                if t < S - 1:
+                    next_token = logits_t.argmax(dim=-1)  # Greedy decoding
+                    decoder_input[:, t+1] = next_token
         
         return aux_logits

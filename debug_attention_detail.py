@@ -112,10 +112,10 @@ for pos in range(S):
 # Compute attention scores for position 10
 attn = torch.matmul(q, k.transpose(-2, -1)) * self_attn.scale
 
-# Apply mask
+# Apply mask (EXACT copy from decoder.py)
 idx = torch.arange(S, device=x_norm.device)
-causal = idx.unsqueeze(1) >= idx.unsqueeze(0)
-window = idx.unsqueeze(1) < (idx.unsqueeze(0) + self_attn.window_size)
+causal = idx.unsqueeze(1) <= idx.unsqueeze(0)  # k_idx <= q_idx
+window = idx.unsqueeze(1) >= (idx.unsqueeze(0) - self_attn.window_size + 1)
 mask = ~(causal & window)
 attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
